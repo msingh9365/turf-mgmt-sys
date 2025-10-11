@@ -1,0 +1,117 @@
+version: '3.8'
+
+services:
+  # MySQL Database
+  db:
+    image: mysql:8.0
+    container_name: turf_mysql
+    restart: always
+    environment:
+      MYSQL_DATABASE: turf_management
+      MYSQL_USER: turf_user
+      MYSQL_PASSWORD: turf_password
+      MYSQL_ROOT_PASSWORD: root_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - turf_network
+
+  # Redis for Celery
+  redis:
+    image: redis:7-alpine
+    container_name: turf_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    networks:
+      - turf_network
+
+  # Django Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: turf_backend
+    restart: always
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py collectstatic --noinput &&
+             gunicorn turf_management.wsgi:application --bind 0.0.0.0:8000"
+    volumes:
+      - ./backend:/app
+      - static_volume:/app/staticfiles
+      - media_volume:/app/media
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=True
+      - DB_HOST=db
+      - DB_PORT=3306
+      - DB_NAME=turf_management
+      - DB_USER=turf_user
+      - DB_PASSWORD=turf_password
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+    networks:
+      - turf_network
+
+  # Celery Worker
+  celery:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: turf_celery
+    restart: always
+    command: celery -A turf_management worker -l info
+    volumes:
+      - ./backend:/app
+    environment:
+      - DB_HOST=db
+      - DB_PORT=3306
+      - DB_NAME=turf_management
+      - DB_USER=turf_user
+      - DB_PASSWORD=turf_password
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+      - backend
+    networks:
+      - turf_network
+
+  # Celery Beat
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: turf_celery_beat
+    restart: always
+    command: celery -A turf_management beat -l info
+    volumes:
+      - ./backend:/app
+    environment:
+      - DB_HOST=db
+      - DB_PORT=3306
+      - DB_NAME=turf_management
+      - DB_USER=turf_user
+      - DB_PASSWORD=turf_password
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+      - backend
+    networks:
+      - turf_network
+
+volumes:
+  mysql_data:
+  static_volume:
+  media_volume:
+
+networks:
+  turf_network:
+    driver: bridge
