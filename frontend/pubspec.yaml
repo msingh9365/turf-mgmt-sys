@@ -1,0 +1,60 @@
+name: turf_management
+description: A campus-exclusive platform for sports ground bookings and team formation.
+
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # UI & Design
+  cupertino_icons: ^1.0.2
+  google_fonts: ^5.1.0
+  
+  # State Management
+  provider: ^6.0.5
+  
+  # Networking
+  http: ^1.1.0
+  dio: ^5.3.2
+  
+  # Local Storage
+  shared_preferences: ^2.2.0
+  
+  # Authentication
+  flutter_secure_storage: ^8.0.0
+  
+  # Push Notifications
+  firebase_core: ^2.15.1
+  firebase_messaging: ^14.6.7
+  flutter_local_notifications: ^15.1.1
+  
+  # Image Handling
+  image_picker: ^1.0.2
+  cached_network_image: ^3.2.3
+  
+  # Date & Time
+  intl: ^0.18.1
+  table_calendar: ^3.0.9
+  
+  # Other Utilities
+  url_launcher: ^6.1.12
+  flutter_svg: ^2.0.7
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^2.0.0
+
+flutter:
+  uses-material-design: true
+  
+  # Assets
+  # assets:
+  #   - images/
+  #   - icons/
