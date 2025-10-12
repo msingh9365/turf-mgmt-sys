@@ -24,15 +24,24 @@ The frontend is responsible for:
 
 ## 👩‍💻 Role & Contribution
 **Frontend Lead:** DEVASARI TEJA  
-- Designed and implemented main user flow and UI/UX components.
-- Coordinated with backend developers for API integration endpoints.
-- Managed project structure, Flutter setup, and Git branch workflow.
+- Designed and implemented main user flow and UI/UX components.  
+- Coordinated with backend developers for API integration endpoints.  
+- Managed project structure, Flutter setup, and Git branch workflow.  
 
 ---
 
-## 🚀 Next Steps
-- Integrate backend authentication API.
-- Implement turf listing and booking screens.
-- Add user profile and notification modules.
+## ⚙️ Setup & Run Instructions
 
----
+Follow these steps to clone and run the frontend on your system:
+
+### 1️⃣ Prerequisites
+Make sure you have:
+- **Flutter SDK** installed → [Install Guide](https://docs.flutter.dev/get-started/install)
+- **VS Code** or **Android Studio**
+- **Android SDK** (via Android Studio)
+- A connected Android device or emulator
+
+### 2️⃣ Clone the repository
+```bash
+git clone https://github.com/msingh9365/turf-mgmt-sys.git
+
