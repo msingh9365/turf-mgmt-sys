@@ -1,24 +1,22 @@
 import 'package:flutter/material.dart';
+import 'signup_page.dart';
 
-class SignupPage extends StatefulWidget {
-  const SignupPage({super.key});
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
 
   @override
-  State<SignupPage> createState() => _SignupPageState();
+  State<LoginPage> createState() => _LoginPageState();
 }
 
-class _SignupPageState extends State<SignupPage> {
-  final TextEditingController nameCtrl = TextEditingController();
+class _LoginPageState extends State<LoginPage> {
   final TextEditingController emailCtrl = TextEditingController();
   final TextEditingController passCtrl = TextEditingController();
-  final TextEditingController confCtrl = TextEditingController();
-
   bool passVisible = false;
-  bool confVisible = false;
-  bool creating = false;
+  bool loading = false;
 
+  // design colors (kept as non-const where referenced in TextStyle)
   static const Color bgMint = Color(0xFFE8F5E9);
-  static const Color pillGreenHex = Color(0xFFA7D7B0);
+  static const Color pillGreenHex = Color(0xFFA7D7B0); // darker mint pill
   final Color accentGreen = Colors.green.shade800;
   final Color labelColor = Colors.black87;
   final Color hintColor = Colors.black54;
@@ -27,38 +25,29 @@ class _SignupPageState extends State<SignupPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: bgMint,
-      appBar: AppBar(
-        backgroundColor: bgMint,
-        elevation: 0,
-        iconTheme: IconThemeData(color: accentGreen),
-        title: Text('Create Account', style: TextStyle(color: accentGreen, fontWeight: FontWeight.w700)),
-      ),
       body: SafeArea(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Sign up and join your campus community', style: TextStyle(fontSize: 14, color: hintColor)),
-              const SizedBox(height: 18),
-
-              _pillField(
-                child: Row(
-                  children: [
-                    Icon(Icons.person_outline, color: Colors.black54),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: TextField(
-                        controller: nameCtrl,
-                        style: TextStyle(color: labelColor),
-                        decoration: InputDecoration(hintText: 'Full name', hintStyle: TextStyle(color: hintColor), border: InputBorder.none),
-                      ),
-                    ),
-                  ],
+              const SizedBox(height: 8),
+              Text(
+                'Welcome to EndGame',
+                style: TextStyle(
+                  fontSize: 34,
+                  fontWeight: FontWeight.w800,
+                  color: accentGreen,
                 ),
               ),
-              const SizedBox(height: 14),
+              const SizedBox(height: 6),
+              Text(
+                'Sign in to continue to your campus turf & teams.',
+                style: TextStyle(fontSize: 14, color: hintColor),
+              ),
+              const SizedBox(height: 28),
 
+              // Email field pill
               _pillField(
                 child: Row(
                   children: [
@@ -69,7 +58,11 @@ class _SignupPageState extends State<SignupPage> {
                         controller: emailCtrl,
                         keyboardType: TextInputType.emailAddress,
                         style: TextStyle(color: labelColor),
-                        decoration: InputDecoration(hintText: 'Email', hintStyle: TextStyle(color: hintColor), border: InputBorder.none),
+                        decoration: InputDecoration(
+                          hintText: 'Email',
+                          hintStyle: TextStyle(color: hintColor),
+                          border: InputBorder.none,
+                        ),
                       ),
                     ),
                   ],
@@ -77,6 +70,7 @@ class _SignupPageState extends State<SignupPage> {
               ),
               const SizedBox(height: 14),
 
+              // Password field pill
               _pillField(
                 child: Row(
                   children: [
@@ -87,74 +81,73 @@ class _SignupPageState extends State<SignupPage> {
                         controller: passCtrl,
                         obscureText: !passVisible,
                         style: TextStyle(color: labelColor),
-                        decoration: InputDecoration(hintText: 'Password', hintStyle: TextStyle(color: hintColor), border: InputBorder.none),
+                        decoration: InputDecoration(
+                          hintText: 'Password',
+                          hintStyle: TextStyle(color: hintColor),
+                          border: InputBorder.none,
+                        ),
                       ),
                     ),
                     IconButton(
-                      icon: Icon(passVisible ? Icons.visibility : Icons.visibility_off, color: Colors.black54),
+                      icon: Icon(
+                        passVisible ? Icons.visibility : Icons.visibility_off,
+                        color: Colors.black54,
+                      ),
                       onPressed: () => setState(() => passVisible = !passVisible),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(height: 14),
-
-              _pillField(
-                child: Row(
-                  children: [
-                    Icon(Icons.lock_outline, color: Colors.black54),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: TextField(
-                        controller: confCtrl,
-                        obscureText: !confVisible,
-                        style: TextStyle(color: labelColor),
-                        decoration: InputDecoration(hintText: 'Confirm password', hintStyle: TextStyle(color: hintColor), border: InputBorder.none),
-                      ),
-                    ),
-                    IconButton(
-                      icon: Icon(confVisible ? Icons.visibility : Icons.visibility_off, color: Colors.black54),
-                      onPressed: () => setState(() => confVisible = !confVisible),
-                    ),
-                  ],
-                ),
-              ),
               const SizedBox(height: 18),
 
+              // Google sign-in button (pill)
               _centeredChild(_googleSignInButton()),
               const SizedBox(height: 18),
 
+              // Login button
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
-                  onPressed: creating
+                  onPressed: loading
                       ? null
                       : () async {
-                          setState(() => creating = true);
+                          setState(() => loading = true);
                           await Future.delayed(const Duration(milliseconds: 700));
-                          setState(() => creating = false);
-                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Account created (demo). Please login.')));
-                          Navigator.pop(context);
+                          setState(() => loading = false);
+                          // demo: navigate to home or wherever your app expects
+                          // If you use named routes, replace below with Navigator.pushReplacementNamed(context,'/home');
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Logged in (demo)')),
+                          );
                         },
                   style: ElevatedButton.styleFrom(
                     backgroundColor: accentGreen,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(30),
+                    ),
                   ),
-                  child: creating
-                      ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-                      : const Text('Create account', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                  child: loading
+                      ? const SizedBox(
+                          height: 18,
+                          width: 18,
+                          child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                        )
+                      : const Text('Login', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
                 ),
               ),
-              const SizedBox(height: 18),
+              const SizedBox(height: 14),
 
-              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                const Text('Already have an account?'),
-                TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: Text('Sign in', style: TextStyle(color: accentGreen, fontWeight: FontWeight.w700)),
-                ),
-              ]),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Text("Don't have an account?"),
+                  TextButton(
+                    onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SignupPage())),
+                    child: Text('Create account', style: TextStyle(color: accentGreen, fontWeight: FontWeight.w700)),
+                  ),
+                ],
+              ),
             ],
           ),
         ),
@@ -162,6 +155,7 @@ class _SignupPageState extends State<SignupPage> {
     );
   }
 
+  // central pill field builder
   Widget _pillField({required Widget child}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -174,9 +168,11 @@ class _SignupPageState extends State<SignupPage> {
     );
   }
 
+  // Google button (UI only)
   Widget _googleSignInButton() {
     return GestureDetector(
       onTap: () {
+        // UI placeholder — replace with actual auth call later
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Google sign-in tapped (placeholder)')));
       },
       child: Container(
@@ -189,6 +185,7 @@ class _SignupPageState extends State<SignupPage> {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
+            // If you add assets/google_logo.png and list it in pubspec.yaml, change _googleLogoExists to true.
             if (_googleLogoExists())
               Image.asset('assets/google_logo.png', height: 20, width: 20)
             else
@@ -207,7 +204,11 @@ class _SignupPageState extends State<SignupPage> {
     );
   }
 
-  bool _googleLogoExists() => false;
+  // helper (toggle to true after you add asset)
+  bool _googleLogoExists() {
+    return false;
+  }
 
+  // small helper to center and constrain width
   Widget _centeredChild(Widget child) => Center(child: ConstrainedBox(constraints: const BoxConstraints(minWidth: 240), child: child));
 }
