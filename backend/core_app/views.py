@@ -1,44 +1,43 @@
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
-from django.conf import settings 
 from .models import User 
 import jwt
 import datetime
 
-# **IMPORTANT: REPLACE WITH A SECURE KEY FROM settings.py**
+# NOTE: This key must be a secret. In a production app, use settings.SECRET_KEY.
 SECRET_KEY = 'your_super_secret_key_from_settings' 
 
 @api_view(['POST'])
 def login_view(request):
     """Handles POST request for /auth/login - verifies user credentials."""
     
+    # 1. Get credentials from Devasari's frontend request
     email = request.data.get('email_id')
     entry_no = request.data.get('entry_no')
-    password = request.data.get('password') # Password hash is stored in DB
+    password = request.data.get('password') 
     
-    # 1. Look up user by unique email and entry number
+    # 2. Look up user in the database
     try:
-        # Check against your combined keys in the users table
         user = User.objects.get(email_id=email, entry_no=entry_no)
     except User.DoesNotExist:
-        # User not found with that combination
+       
         return Response({'message': 'Invalid credentials.'}, 
                         status=status.HTTP_401_UNAUTHORIZED)
     
-    # 2. Password Check (CRITICAL: Placeholder logic - must be replaced with check_password)
-    # For initial testing, we use the stored hash field, but ONLY use hashed passwords!
+    # 3. Password Check (VERY IMPORTANT: Replace with password hashing/checking later!)
     if password == user.password_hash: 
         
-        # 3. Generate a temporary Auth Token (JWT)
-        # The token is based on user ID and expires in 24 hours
+        # 4. Generate a temporary Auth Token (JWT)
         payload = {
             'id': user.user_id,
+            
             'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24), 
             'iat': datetime.datetime.utcnow()
         }
         token = jwt.encode(payload, SECRET_KEY, algorithm='HS256')
         
+        # Success response
         return Response({
             'message': 'Login successful',
             'user_id': user.user_id,
@@ -48,3 +47,4 @@ def login_view(request):
         # Invalid password
         return Response({'message': 'Invalid credentials.'}, 
                         status=status.HTTP_401_UNAUTHORIZED)
+
