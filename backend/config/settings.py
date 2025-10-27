@@ -17,7 +17,7 @@ INSTALLED_APPS = [
 
     'rest_framework',  
     # My Project Apps
-    'core_app',      
+    'turfify',      
 ]
 
 
