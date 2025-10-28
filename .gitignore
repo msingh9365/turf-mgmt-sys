@@ -2,3 +2,4 @@
 __pycache__/
 *.py[cod]
 *$py.class
+backend/src/core/firebase/*.json
