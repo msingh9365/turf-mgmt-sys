@@ -1,7 +1,7 @@
 """
 Base Django settings for the playground backend.
 - Loads environment variables using django-environ
-- Configures DRF, JWT, CORS, and MySQL
+- Configures DRF, JWT, CORS, and Supabase Postgres
 - Uses custom user model `users.User`
 This file is imported by environment-specific settings (dev/prod).
 """
@@ -21,17 +21,16 @@ env = environ.Env(
     DJANGO_SECRET_KEY=(str, ""),
     ALLOWED_HOSTS=(list, ["localhost"]),
     DB_USE_SQLITE=(bool, False),
-    DB_NAME=(str, "playground_db"),
-    DB_USER=(str, "root"),
-    DB_PASSWORD=(str, "root"),
-    DB_HOST=(str, "localhost"),
-    DB_PORT=(int, 3306),
+    DATABASE_URL=(str, ""),  # Supabase Postgres connection string
     ALLOWED_EMAIL_DOMAIN=(str, "@iitrpr.ac.in"),
     JWT_ACCESS_LIFETIME=(int, 15),
     JWT_REFRESH_LIFETIME=(int, 7),
     GOOGLE_CLIENT_ID_ANDROID=(str, "stub_android_id"),
     GOOGLE_CLIENT_ID_WEB=(str, "stub_web_id"),
     GOOGLE_CLIENT_SECRET_WEB=(str, "stub_web_secret"),
+    SUPABASE_URL=(str, ""),
+    SUPABASE_KEY=(str, ""),
+    SUPABASE_JWT_SECRET=(str, ""),
 )
 
 # Load .env if present at project root
@@ -96,7 +95,7 @@ TEMPLATES = [
 
 # Database configuration
 if env.bool("DB_USE_SQLITE"):
-    # Lightweight DB for local development/testing. Production should use MySQL.
+    # Lightweight DB for local development/testing
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
@@ -104,18 +103,8 @@ if env.bool("DB_USE_SQLITE"):
         }
     }
 else:
-    # MySQL (default)
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.mysql",
-            "NAME": env("DB_NAME"),
-            "USER": env("DB_USER"),
-            "PASSWORD": env("DB_PASSWORD"),
-            "HOST": env("DB_HOST"),
-            "PORT": env("DB_PORT"),
-            "OPTIONS": {"charset": "utf8mb4"},
-        }
-    }
+    # Supabase Postgres (production)
+    DATABASES = {"default": env.db("DATABASE_URL")}
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
