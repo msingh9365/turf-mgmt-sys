@@ -31,6 +31,9 @@ env = environ.Env(
     SUPABASE_URL=(str, ""),
     SUPABASE_KEY=(str, ""),
     SUPABASE_JWT_SECRET=(str, ""),
+    REDIS_HOST=(str, "localhost"),
+    REDIS_PORT=(int, 6379),
+    REDIS_DB=(int, 0),
 )
 
 # Load .env if present at project root
@@ -59,6 +62,7 @@ INSTALLED_APPS = [
 
     # Local apps
     "users",
+    "bookings",
 ]
 
 MIDDLEWARE = [
@@ -184,3 +188,18 @@ ALLOWED_EMAIL_DOMAIN = env("ALLOWED_EMAIL_DOMAIN")
 GOOGLE_CLIENT_ID_ANDROID = env("GOOGLE_CLIENT_ID_ANDROID")
 GOOGLE_CLIENT_ID_WEB = env("GOOGLE_CLIENT_ID_WEB")
 GOOGLE_CLIENT_SECRET_WEB = env("GOOGLE_CLIENT_SECRET_WEB")
+
+# Redis configuration
+REDIS_HOST = env("REDIS_HOST")
+REDIS_PORT = env("REDIS_PORT")
+REDIS_DB = env("REDIS_DB")
+
+# Cache configuration using Redis
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}",
+        "KEY_PREFIX": "turf_mgmt",
+        "TIMEOUT": 300,  # Default cache timeout (5 minutes)
+    }
+}
