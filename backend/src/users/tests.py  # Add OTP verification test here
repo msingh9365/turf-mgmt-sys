@@ -1,0 +1,38 @@
+# otp verivication test here.
+
+from django.test import TestCase
+from django.urls import reverse
+from users.models import User, OTP
+
+class OTPVerificationTestCase(TestCase):
+    def setUp(self):
+        self.email = 'testuser@example.com'
+        self.user = User.objects.create(Email_ID=self.email, name='Test User')
+        self.send_otp_url = reverse('send-otp')
+        self.verify_otp_url = reverse('verify-otp')
+
+    def test_send_otp_success(self):
+        response = self.client.post(self.send_otp_url, {'email': self.email})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json().get('detail'), 'OTP sent to email.')
+        self.assertTrue(OTP.objects.filter(user=self.user).exists())
+
+    def test_send_otp_user_not_found(self):
+        response = self.client.post(self.send_otp_url, {'email': 'nouser@example.com'})
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json().get('detail'), 'User not found.')
+
+    def test_verify_otp_success(self):
+        self.client.post(self.send_otp_url, {'email': self.email})
+        otp_instance = OTP.objects.filter(user=self.user).latest('created_at')
+        response = self.client.post(self.verify_otp_url, {'email': self.email, 'otp': otp_instance.code})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json().get('detail'), 'Verification successful.')
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.is_email_verified)
+
+    def test_verify_otp_invalid(self):
+        self.client.post(self.send_otp_url, {'email': self.email})
+        response = self.client.post(self.verify_otp_url, {'email': self.email, 'otp': 'wrongotp'})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json().get('detail'), 'Invalid OTP or email.')

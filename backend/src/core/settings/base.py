@@ -196,3 +196,61 @@ ALLOWED_EMAIL_DOMAIN = env("ALLOWED_EMAIL_DOMAIN")
 GOOGLE_CLIENT_ID_ANDROID = env("GOOGLE_CLIENT_ID_ANDROID")
 GOOGLE_CLIENT_ID_WEB = env("GOOGLE_CLIENT_ID_WEB")
 GOOGLE_CLIENT_SECRET_WEB = env("GOOGLE_CLIENT_SECRET_WEB")
+
+# ================================
+# 📧 Email Configuration (Gmail SMTP)
+# Used by Django to send OTPs, password reset links, or notifications.
+# ================================
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = 'smtp.gmail.com'
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = 'your_iitrpr_email@gmail.com'
+EMAIL_HOST_PASSWORD = 'your_app_password'
+DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
+
+
+# ================================
+# 💾 Redis and Caching Configuration (Manish's Week 2 Task)
+# ================================
+
+# --- Redis Configuration ---
+# You can load these URLs from .env if desired, but using constants for now.
+# Note: Celery uses DB 0, Django Cache/Locks uses DB 1.
+REDIS_BROKER_URL = "redis://127.0.0.1:6379/0" 
+REDIS_CACHE_URL = "redis://127.0.0.1:6379/1" 
+
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": REDIS_CACHE_URL,
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            "IGNORE_EXCEPTIONS": True, # Safely handle Redis outages
+        }
+    },
+    # Dedicated cache alias for concurrency locks (used in BookingViewSet)
+    "locks": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": REDIS_CACHE_URL,
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            "KEY_PREFIX": "booking_lock",
+        }
+    }
+}
+
+
+# --- CELERY CONFIGURATION (Asynchronous Tasks for FCM) ---
+
+# Use the Redis Broker URL (DB 0)
+CELERY_BROKER_URL = REDIS_BROKER_URL 
+CELERY_RESULT_BACKEND = REDIS_BROKER_URL
+
+# Celery Task Settings
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = TIME_ZONE # Use Django's configured timezone (UTC in your case)
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_ALWAYS_EAGER = False

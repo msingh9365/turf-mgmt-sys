@@ -9,7 +9,8 @@ from django.contrib.auth.models import PermissionsMixin
 from django.core.validators import RegexValidator
 from django.db import models
 from django.utils import timezone
-
+from django.conf import settings
+from datetime import datetime, timedelta
 
 class UserManager(BaseUserManager):
     """Manager for the custom User model using email as username."""
@@ -87,3 +88,179 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return f"{self.email} ({self.name})"
+    
+
+# ---------------------- 1. Sport Table (2) ----------------------
+class Sport(models.Model):
+    """Maps to Sport_ID, Sport_Name, Min_Player."""
+    # Sport_ID is the auto-generated primary key
+    sport_name = models.CharField(max_length=100, unique=True)
+    min_player = models.IntegerField()
+    
+    class Meta:
+        db_table = "sport"
+    
+    def __str__(self):
+        return self.sport_name
+
+# ---------------------- 2. Ground Table (3) ----------------------
+class Ground(models.Model):
+    """Maps to Ground_ID, Ground_Name, Sport_ID."""
+    # Ground_ID is the auto-generated primary key
+    ground_name = models.CharField(max_length=100)
+    
+    # One Ground belongs to one Sport (per your schema)
+    sport = models.ForeignKey(Sport, on_delete=models.RESTRICT, db_column='Sport_ID', related_name='grounds')
+    
+    class Meta:
+        db_table = "ground"
+    
+    def __str__(self):
+        return f"{self.ground_name} ({self.sport.sport_name})"
+
+# ---------------------- 3. Slot Table (4) ----------------------
+class Slot(models.Model):
+    """Maps to Slot_ID, Ground_ID, Date, Booked, Unique_ID."""
+    # Slot_ID is the auto-generated primary key
+    ground = models.ForeignKey(Ground, on_delete=models.RESTRICT, db_column='Ground_ID', related_name='slots')
+    date = models.DateField()
+    booked = models.BooleanField(default=False)
+    
+    # Unique_ID for linking to Booking and Waitlist. We use CharField for UUIDs.
+    unique_id = models.CharField(max_length=50, unique=True, blank=True, null=True) 
+    
+    class Meta:
+        db_table = "slot"
+        # Unique constraint from schema: UNIQUE KEY (Ground_ID, Date, Slot_ID)
+        # We rely on PK for Slot_ID uniqueness, and ground+date to ensure uniqueness for slot data.
+        # Note: If Ground_ID and Date alone are unique identifiers for this table, 
+        # the UNIQUE KEY in the schema is redundant. We will ensure Ground+Date 
+        # is unique to ensure a ground on a date is represented by one Slot row.
+        # Given your Time_Table structure, we'll keep it simple for now and rely on PK.
+    
+    def __str__(self):
+        return f"{self.ground.ground_name} | {self.date}"
+
+# ---------------------- 4. Time_Table (5) ----------------------
+class TimeSlot(models.Model): 
+    """Maps to Slot_ID (FK), Time (the actual bookable time)."""
+    # Note: Renamed to TimeSlot to avoid Python keyword conflict with datetime.time
+    
+    # The Slot row this time belongs to (ON DELETE CASCADE)
+    slot = models.ForeignKey(Slot, on_delete=models.CASCADE, db_column='Slot_ID', related_name='times')
+    
+    # The actual TIME field
+    time = models.TimeField()
+    
+    class Meta:
+        db_table = "time_table"
+        # Primary key constraint (Slot_ID, Time)
+        unique_together = ('slot', 'time')
+        
+    def __str__(self):
+        return f"{self.slot.ground.ground_name} - {self.slot.date} @ {self.time}"
+
+# ---------------------- 5. Notification Table (8) ----------------------
+class SportNotification(models.Model):
+    """Maps to User_ID and Sports_ID (User subscriptions)."""
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, db_column='User_ID')
+    sport = models.ForeignKey(Sport, on_delete=models.CASCADE, db_column='Sports_ID')
+    
+    class Meta:
+        db_table = "notification"
+        # Primary key constraint (User_ID, Sports_ID)
+        unique_together = ('user', 'sport')
+
+    def __str__(self):
+        return f"{self.user.email} subscribes to {self.sport.sport_name}"
+
+# ---------------------- Booking ----------------------
+import uuid
+
+# Define the status choices based on your schema's ENUM
+BOOKING_STATUS_CHOICES = [
+    ('Done', 'Done'),
+    ('Rejected', 'Rejected'),
+    ('Waitlist Processing', 'Waitlist Processing'),
+]
+
+class Booking(models.Model):
+    """
+    Corresponds to Schema Table 6: Stores the primary reservation transaction record.
+    Note: Unique_ID is the PK in the schema, but we will use Django's 'id' as 
+    PK and enforce unique constraint on Unique_ID for simplicity.
+    """
+    
+    # Schema PK: VARCHAR(50) PRIMARY KEY (Using CharField with unique=True)
+    unique_id = models.CharField(
+        max_length=50, 
+        unique=True, 
+        default=uuid.uuid4, # Auto-generate the ID
+        verbose_name="Unique Booking ID"
+    )
+    # Schema Booking_ID: INT AUTO_INCREMENT UNIQUE (Using Django's default 'id' PK)
+    
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.RESTRICT, db_column='User_ID', related_name='bookings')
+    metadata = models.JSONField(null=True, blank=True)
+    status = models.CharField(max_length=50, choices=BOOKING_STATUS_CHOICES, default='Waitlist Processing')
+
+    class Meta:
+        db_table = "booking"
+        verbose_name = "Booking"
+        verbose_name_plural = "Bookings"
+    
+    def __str__(self):
+        return f"Booking {self.unique_id} by {self.user.email}"
+
+# ---------------------- BookingDetails ----------------------
+
+class BookedDetails(models.Model):
+    """
+    Corresponds to Schema Table 10: Stores participant details and reservation metadata.
+    This serves as the 'Member Lock System' record.
+    """
+    # NOTE: Since Name, R_Mail, and Sort_Key are available from the linked User, 
+    # we link to the user and avoid data duplication for users who are registered.
+
+    # Primary Link: The Ground and Slot reserved
+    ground = models.ForeignKey('Ground', on_delete=models.RESTRICT, db_column='Ground_ID')
+    slot = models.ForeignKey('Slot', on_delete=models.RESTRICT, db_column='Slot_ID')
+    date = models.DateField()
+
+    # Participant Details (Required by your schema, even if redundant for registered users)
+    name = models.CharField(max_length=100)
+    r_mail = models.CharField(max_length=100)
+    sort_key = models.CharField(max_length=20)
+    
+    # If the participant is a registered User (best practice for Member Lock System)
+    user_or_not = models.BooleanField(default=False, verbose_name="Is Registered User")
+    
+    # Optional Link to the User (If user_or_not is True)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
+
+    class Meta:
+        db_table = "booked_details"
+        verbose_name = "Booked Detail"
+        verbose_name_plural = "Booked Details"
+        # We will need to enforce uniqueness in a complex way at the API level
+        # to ensure the same user isn't booked in the same slot twice.
+
+    def __str__(self):
+        return f"Booking Detail for {self.r_mail} on {self.date}"
+
+# ---------------------- OTP Model ----------------------
+class OTP(models.Model):
+    email = models.EmailField()
+    code = models.CharField(max_length=6)
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_verified = models.BooleanField(default=False)  # Add this field
+
+
+    class Meta:
+        db_table = "otp"  # 👈 this forces the table name
+
+    def is_valid(self):
+        from django.utils import timezone
+        from datetime import timedelta
+        return timezone.now() <= self.created_at + timedelta(minutes=5)
+
