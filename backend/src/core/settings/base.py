@@ -33,6 +33,7 @@ env = environ.Env(
     SUPABASE_JWT_SECRET=(str, ""),
     REDIS_HOST=(str, "localhost"),
     REDIS_PORT=(int, 6379),
+    REDIS_PASSWORD=(str, ""),
     REDIS_DB=(int, 0),
 )
 
@@ -192,13 +193,14 @@ GOOGLE_CLIENT_SECRET_WEB = env("GOOGLE_CLIENT_SECRET_WEB")
 # Redis configuration
 REDIS_HOST = env("REDIS_HOST")
 REDIS_PORT = env("REDIS_PORT")
+REDIS_PASSWORD = env("REDIS_PASSWORD")
 REDIS_DB = env("REDIS_DB")
 
 # Cache configuration using Redis
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",
-        "LOCATION": f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}",
+        "LOCATION": f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}" if REDIS_PASSWORD else f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}",
         "KEY_PREFIX": "turf_mgmt",
         "TIMEOUT": 300,  # Default cache timeout (5 minutes)
     }

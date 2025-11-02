@@ -9,6 +9,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db import transaction
 from django.utils import timezone
+from django.http import Http404
 
 from .models import Booking
 from .serializers import (
@@ -38,9 +39,12 @@ class BookingViewSet(viewsets.ModelViewSet):
     lookup_field = "unique_id"
     
     def get_queryset(self):
-        """Filter queryset based on the user."""
+        """Filter queryset based on the user and action."""
         if self.action == "my_bookings":
             return Booking.objects.filter(user=self.request.user)
+        elif self.action == "destroy":
+            # For delete, we need to check all bookings to give proper 403 vs 404
+            return Booking.objects.all()
         return Booking.objects.filter(user=self.request.user)
     
     def create(self, request, *args, **kwargs):
@@ -243,7 +247,7 @@ class BookingViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_200_OK,
             )
         
-        except Booking.DoesNotExist:
+        except Http404:
             return Response(
                 {"error": "Booking not found"},
                 status=status.HTTP_404_NOT_FOUND,
