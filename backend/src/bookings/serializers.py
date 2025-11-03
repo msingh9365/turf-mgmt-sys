@@ -13,7 +13,6 @@ class BookingSerializer(serializers.ModelSerializer):
     Used for responses and GET requests.
     """
     
-    booking_id = serializers.CharField(source="unique_id", read_only=True)
     user_email = serializers.EmailField(source="user.email", read_only=True)
     user_name = serializers.CharField(source="user.name", read_only=True)
     
@@ -37,10 +36,15 @@ class BookingCreateSerializer(serializers.Serializer):
     """
     Serializer for creating a new booking.
     Validates input and enforces business rules.
+    Supports both single slot_id (integer) and multiple slot_ids (list).
     """
     
     ground_id = serializers.IntegerField(min_value=1)
-    slot_id = serializers.IntegerField(min_value=1)
+    slot_id = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        min_length=1,
+        help_text="List of slot IDs to book (e.g., [3, 4, 5])"
+    )
     date = serializers.DateField()
     player_ids = serializers.ListField(
         child=serializers.IntegerField(min_value=1),
@@ -75,9 +79,22 @@ class BookingCreateSerializer(serializers.Serializer):
         return value
     
     def validate_slot_id(self, value):
-        """Validate slot_id exists (placeholder - extend if Slot model available)."""
-        if value < 1:
-            raise serializers.ValidationError("Invalid slot ID.")
+        """
+        Validate slot_ids list.
+        Ensures no duplicate slot IDs in the request.
+        """
+        if not value:
+            raise serializers.ValidationError("At least one slot ID is required.")
+        
+        # Check for duplicates
+        if len(value) != len(set(value)):
+            raise serializers.ValidationError("Duplicate slot IDs are not allowed.")
+        
+        # Validate each slot_id
+        for slot in value:
+            if slot < 1:
+                raise serializers.ValidationError(f"Invalid slot ID: {slot}")
+        
         return value
     
     def validate(self, attrs):

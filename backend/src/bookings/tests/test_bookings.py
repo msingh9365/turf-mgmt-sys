@@ -62,7 +62,7 @@ class TestBookingCreation:
         
         data = {
             "ground_id": 1,
-            "slot_id": 5,
+            "slot_id": [5],  # Now expects a list
             "date": str(tomorrow),
             "player_ids": [2, 3, 4],
             "metadata": {"team_name": "Test Team"},
@@ -73,10 +73,13 @@ class TestBookingCreation:
         assert response.status_code == status.HTTP_200_OK
         assert "booking_id" in response.data
         assert response.data["status"] == "Done"
-        assert "Booking confirmed successfully" in response.data["message"]
+        assert "slots_booked" in response.data
+        assert response.data["slots_booked"] == [5]
         
         # Verify booking exists in database
-        booking = Booking.objects.get(unique_id=response.data["booking_id"])
+        bookings = Booking.objects.filter(booking_id=response.data["booking_id"])
+        assert bookings.count() == 1
+        booking = bookings.first()
         assert booking.user == test_user
         assert booking.ground_id == 1
         assert booking.slot_id == 5
@@ -85,6 +88,44 @@ class TestBookingCreation:
         # Verify Redis slot is marked as booked
         slot_key = f"slot:1:{tomorrow}:5"
         assert fake_redis_client.get(slot_key) == b"booked"
+    
+    def test_multi_slot_booking_creation(self, authenticated_client, test_user, fake_redis_client):
+        """Test successful booking creation with multiple slots sharing same booking_id."""
+        tomorrow = (timezone.now() + timedelta(days=1)).date()
+        
+        data = {
+            "ground_id": 2,
+            "slot_id": [3, 4, 5],  # Multiple slots
+            "date": str(tomorrow),
+            "metadata": {"team_name": "Hostel 5 FC", "notes": "Final match"},
+        }
+        
+        response = authenticated_client.post("/api/bookings/", data, format="json")
+        
+        assert response.status_code == status.HTTP_200_OK
+        assert "booking_id" in response.data
+        assert response.data["status"] == "Done"
+        assert "slots_booked" in response.data
+        assert response.data["slots_booked"] == [3, 4, 5]
+        assert "3 slot(s)" in response.data["message"]
+        
+        # Verify all 3 bookings exist in database with SAME booking_id
+        booking_id = response.data["booking_id"]
+        bookings = Booking.objects.filter(booking_id=booking_id).order_by('slot_id')
+        assert bookings.count() == 3
+        
+        # Verify each booking has correct slot and same booking_id
+        for idx, booking in enumerate(bookings):
+            assert booking.booking_id == booking_id
+            assert booking.user == test_user
+            assert booking.ground_id == 2
+            assert booking.slot_id == [3, 4, 5][idx]
+            assert booking.status == Booking.STATUS_DONE
+        
+        # Verify all slots are marked as booked in Redis
+        for slot in [3, 4, 5]:
+            slot_key = f"slot:2:{tomorrow}:{slot}"
+            assert fake_redis_client.get(slot_key) == b"booked"
     
     def test_booking_past_date_rejected(self, authenticated_client, fake_redis_client):
         """Test that booking in the past is rejected."""
@@ -132,7 +173,7 @@ class TestBookingCreation:
         # Try to create duplicate booking
         data = {
             "ground_id": 1,
-            "slot_id": 5,
+            "slot_id": [5],
             "date": str(tomorrow),
         }
         
@@ -151,7 +192,7 @@ class TestBookingCreation:
         
         data = {
             "ground_id": 1,
-            "slot_id": 5,
+            "slot_id": [5],
             "date": str(tomorrow),
         }
         
@@ -206,8 +247,8 @@ class TestBookingRetrieval:
         assert len(response.data) == 2
         
         booking_ids = [b["booking_id"] for b in response.data]
-        assert booking1.unique_id in booking_ids
-        assert booking2.unique_id in booking_ids
+        assert booking1.booking_id in booking_ids
+        assert booking2.booking_id in booking_ids
     
     def test_get_my_bookings_empty(self, authenticated_client, fake_redis_client):
         """Test retrieving bookings when user has none."""
@@ -242,7 +283,7 @@ class TestBookingRetrieval:
         
         assert response.status_code == status.HTTP_200_OK
         assert len(response.data) == 1
-        assert response.data[0]["booking_id"] == user_booking.unique_id
+        assert response.data[0]["booking_id"] == user_booking.booking_id
 
 
 @pytest.mark.django_db
@@ -265,7 +306,7 @@ class TestBookingCancellation:
         slot_key = f"slot:1:{tomorrow}:5"
         fake_redis_client.set(slot_key, "booked")
         
-        response = authenticated_client.delete(f"/api/bookings/{booking.unique_id}/")
+        response = authenticated_client.delete(f"/api/bookings/{booking.booking_id}/")
         
         assert response.status_code == status.HTTP_200_OK
         assert "cancelled successfully" in response.data["message"].lower()
@@ -289,7 +330,7 @@ class TestBookingCancellation:
             status=Booking.STATUS_DONE,
         )
         
-        response = authenticated_client.delete(f"/api/bookings/{booking.unique_id}/")
+        response = authenticated_client.delete(f"/api/bookings/{booking.booking_id}/")
         
         assert response.status_code == status.HTTP_403_FORBIDDEN
         assert "own bookings" in response.data["error"].lower()
@@ -306,7 +347,7 @@ class TestBookingCancellation:
             status=Booking.STATUS_DONE,
         )
         
-        response = authenticated_client.delete(f"/api/bookings/{booking.unique_id}/")
+        response = authenticated_client.delete(f"/api/bookings/{booking.booking_id}/")
         
         assert response.status_code == status.HTTP_400_BAD_REQUEST
         assert "cannot cancel past" in response.data["error"].lower()
@@ -323,7 +364,7 @@ class TestBookingCancellation:
             status=Booking.STATUS_REJECTED,
         )
         
-        response = authenticated_client.delete(f"/api/bookings/{booking.unique_id}/")
+        response = authenticated_client.delete(f"/api/bookings/{booking.booking_id}/")
         
         assert response.status_code == status.HTTP_400_BAD_REQUEST
     
@@ -423,7 +464,7 @@ class TestRedisLocking:
 class TestBookingModel:
     """Tests for Booking model."""
     
-    def test_unique_id_generation(self, test_user):
+    def test_booking_id_generation(self, test_user):
         """Test that unique_id is auto-generated."""
         tomorrow = (timezone.now() + timedelta(days=1)).date()
         
@@ -434,9 +475,9 @@ class TestBookingModel:
             date=tomorrow,
         )
         
-        assert booking.unique_id is not None
-        assert booking.unique_id.startswith("BK")
-        assert len(booking.unique_id) > 10
+        assert booking.booking_id is not None
+        assert booking.booking_id.startswith("BK")
+        assert len(booking.booking_id) > 10
     
     def test_booking_str_representation(self, test_user):
         """Test string representation of booking."""

@@ -36,7 +36,7 @@ class BookingViewSet(viewsets.ModelViewSet):
     queryset = Booking.objects.all()
     serializer_class = BookingSerializer
     permission_classes = [IsAuthenticated]
-    lookup_field = "unique_id"
+    lookup_field = "booking_id"  # Using booking_id to cancel all slots in a booking
     
     def get_queryset(self):
         """Filter queryset based on the user and action."""
@@ -49,110 +49,136 @@ class BookingViewSet(viewsets.ModelViewSet):
     
     def create(self, request, *args, **kwargs):
         """
-        Create a new booking with distributed Redis locking.
+        Create a new booking for one or multiple slots.
+        All slots will share the same Booking_ID.
         
         Flow:
-        1. Validate input data
-        2. Acquire Redis lock for the slot
-        3. Check if slot is already booked (Redis + DB)
-        4. Create booking in database (atomic transaction)
-        5. Mark slot as booked in Redis
-        6. Release lock
+        1. Validate input (date, slot_ids, ground_id)
+        2. Acquire Redis locks for ALL slots (fail if any slot locked/booked)
+        3. Create booking records with same Booking_ID (one row per slot)
+        4. Mark all slots as booked in Redis
+        5. Release all locks
+        
+        Returns:
+            200: Booking created successfully with list of slots_booked
+            400: Validation error (past date, slot already booked, etc.)
+            409: Conflict (slot locked by another user)
+            500: Server error (rollback if any step fails)
         """
-        # Validate input
         serializer = BookingCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         
-        ground_id = serializer.validated_data["ground_id"]
-        slot_id = serializer.validated_data["slot_id"]
-        booking_date = serializer.validated_data["date"]
-        metadata = serializer.validated_data.get("metadata", {})
+        data = serializer.validated_data
+        ground_id = data["ground_id"]
+        slot_ids = data["slot_id"]  # This is a list now
+        booking_date = data["date"]
+        metadata = data.get("metadata", {})
+        
+        # Generate a single Booking_ID that will be shared by all slots
+        booking_id = Booking.generate_booking_id()
         
         user = request.user
         
-        # Try to acquire Redis lock
-        lock_acquired = RedisClient.acquire_slot_lock(
-            ground_id=ground_id,
-            date=str(booking_date),
-            slot_id=slot_id,
-            user_id=user.id,
-            ttl=10,  # 10 seconds lock timeout
-        )
-        
-        if not lock_acquired:
-            logger.warning(
-                f"Lock acquisition failed for slot {slot_id} on {booking_date} "
-                f"by user {user.id}"
-            )
-            return Response(
-                {"error": "Slot is being booked by another user. Please try again."},
-                status=status.HTTP_409_CONFLICT,
-            )
+        # Track locks acquired and slots to create
+        acquired_locks = []
+        slots_to_book = []
         
         try:
-            # Check Redis cache for slot status
-            slot_status = RedisClient.get_slot_status(
-                ground_id=ground_id,
-                date=str(booking_date),
-                slot_id=slot_id,
-            )
-            
-            if slot_status == "booked":
-                logger.info(
-                    f"Slot {slot_id} on {booking_date} already marked as booked in Redis"
+            # Phase 1: Acquire locks and validate all slots
+            for slot_id in slot_ids:
+                # Try to acquire Redis lock for this slot
+                lock_acquired = RedisClient.acquire_slot_lock(
+                    ground_id=ground_id,
+                    date=str(booking_date),
+                    slot_id=slot_id,
+                    user_id=user.id,
+                    ttl=10,  # 10 seconds lock timeout
                 )
-                return Response(
-                    {"error": "Slot already booked"},
-                    status=status.HTTP_409_CONFLICT,
+                
+                if not lock_acquired:
+                    logger.warning(
+                        f"Lock acquisition failed for slot {slot_id} on {booking_date} "
+                        f"by user {user.id}"
+                    )
+                    return Response(
+                        {"error": f"Slot {slot_id} is being booked by another user. Please try again."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                
+                acquired_locks.append(slot_id)
+                
+                # Check Redis cache for slot status
+                slot_status = RedisClient.get_slot_status(
+                    ground_id=ground_id,
+                    date=str(booking_date),
+                    slot_id=slot_id,
                 )
-            
-            # Double-check database for existing active booking
-            existing_booking = Booking.objects.filter(
-                ground_id=ground_id,
-                slot_id=slot_id,
-                date=booking_date,
-                status=Booking.STATUS_DONE,
-            ).first()
-            
-            if existing_booking:
-                logger.warning(
-                    f"Slot {slot_id} on {booking_date} already booked in database"
-                )
-                # Update Redis cache
-                RedisClient.mark_slot_booked(ground_id, str(booking_date), slot_id)
-                return Response(
-                    {"error": "Slot already booked"},
-                    status=status.HTTP_409_CONFLICT,
-                )
-            
-            # Create booking in atomic transaction
-            with transaction.atomic():
-                booking = Booking.objects.create(
-                    user=user,
+                
+                if slot_status == "booked":
+                    logger.info(
+                        f"Slot {slot_id} on {booking_date} already marked as booked in Redis"
+                    )
+                    return Response(
+                        {"error": f"Slot {slot_id} is already booked"},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                
+                # Double-check database for existing active booking
+                existing_booking = Booking.objects.filter(
                     ground_id=ground_id,
                     slot_id=slot_id,
                     date=booking_date,
-                    metadata=metadata,
                     status=Booking.STATUS_DONE,
-                )
+                ).first()
+                
+                if existing_booking:
+                    logger.warning(
+                        f"Slot {slot_id} on {booking_date} already booked in database"
+                    )
+                    # Update Redis cache
+                    RedisClient.mark_slot_booked(ground_id, str(booking_date), slot_id)
+                    return Response(
+                        {"error": f"Slot {slot_id} is already booked"},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                
+                slots_to_book.append(slot_id)
+            
+            # Phase 2: Create booking records - one row per slot, same booking_id
+            with transaction.atomic():
+                created_bookings = []
+                for slot_id in slots_to_book:
+                    booking = Booking.objects.create(
+                        booking_id=booking_id,  # Same Booking_ID for all slots
+                        user=user,
+                        ground_id=ground_id,
+                        slot_id=slot_id,
+                        date=booking_date,
+                        metadata=metadata,
+                        status=Booking.STATUS_DONE,
+                    )
+                    created_bookings.append(booking)
                 
                 logger.info(
-                    f"Booking created: {booking.unique_id} for user {user.id}"
+                    f"Booking created: {booking_id} for user {user.id} "
+                    f"with {len(slots_to_book)} slots: {slots_to_book}"
                 )
             
-            # Mark slot as booked in Redis
-            RedisClient.mark_slot_booked(
-                ground_id=ground_id,
-                date=str(booking_date),
-                slot_id=slot_id,
-            )
+            # Phase 3: Mark all slots as booked in Redis
+            for slot_id in slots_to_book:
+                RedisClient.mark_slot_booked(
+                    ground_id=ground_id,
+                    date=str(booking_date),
+                    slot_id=slot_id,
+                )
             
             # Return success response
             return Response(
                 {
-                    "booking_id": booking.unique_id,
-                    "status": booking.status,
-                    "message": "Booking confirmed successfully",
+                    "booking_id": booking_id,
+                    "status": Booking.STATUS_DONE,
+                    "slots_booked": slots_to_book,
+                    "message": f"Successfully booked {len(slots_to_book)} slot(s)",
                 },
                 status=status.HTTP_200_OK,
             )
@@ -165,13 +191,13 @@ class BookingViewSet(viewsets.ModelViewSet):
             )
         
         finally:
-            # Always release the lock
-            RedisClient.release_slot_lock(
-                ground_id=ground_id,
-                date=str(booking_date),
-                slot_id=slot_id,
-            )
-            logger.debug(f"Lock released for slot {slot_id} on {booking_date}")
+            # Always release all acquired locks
+            for slot_id in acquired_locks:
+                RedisClient.release_slot_lock(
+                    ground_id=ground_id,
+                    date=str(booking_date),
+                    slot_id=slot_id,
+                )
     
     @action(detail=False, methods=["get"], url_path="my")
     def my_bookings(self, request):
@@ -188,6 +214,7 @@ class BookingViewSet(viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         """
         Cancel a booking (mark as Rejected).
+        Cancels ALL slots associated with the same booking_id.
         
         Validations:
         1. Booking must belong to the authenticated user
@@ -195,54 +222,70 @@ class BookingViewSet(viewsets.ModelViewSet):
         3. Booking date must be in the future
         
         Updates:
-        - Database: Status = 'Rejected'
-        - Redis: Slot marked as 'available'
+        - Database: Status = 'Rejected' for all slots with same booking_id
+        - Redis: All slots marked as 'available'
         """
         try:
-            # Get booking by unique_id
-            booking = self.get_object()
+            # Get the booking_id from URL
+            booking_id = self.kwargs.get('booking_id')
             
-            # Verify ownership
-            if booking.user != request.user:
+            # Get all bookings with this booking_id
+            bookings = Booking.objects.filter(booking_id=booking_id)
+            
+            if not bookings.exists():
+                return Response(
+                    {"error": "Booking not found"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            
+            # Verify ownership (check first booking, all should have same user)
+            first_booking = bookings.first()
+            if first_booking.user != request.user:
                 return Response(
                     {"error": "You can only cancel your own bookings"},
                     status=status.HTTP_403_FORBIDDEN,
                 )
             
-            # Check if booking can be cancelled
-            if booking.status != Booking.STATUS_DONE:
-                return Response(
-                    {"error": f"Cannot cancel booking with status '{booking.status}'"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+            # Check if all bookings can be cancelled
+            for booking in bookings:
+                if booking.status != Booking.STATUS_DONE:
+                    return Response(
+                        {"error": f"Cannot cancel booking with status '{booking.status}'"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                
+                if not booking.can_be_cancelled:
+                    return Response(
+                        {"error": "Cannot cancel past bookings or bookings that have started"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
             
-            # Check if booking date is in the future
-            if not booking.can_be_cancelled:
-                return Response(
-                    {"error": "Cannot cancel past bookings or bookings that have started"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            
-            # Update booking status to Rejected
+            # Update all bookings status to Rejected
             with transaction.atomic():
-                booking.status = Booking.STATUS_REJECTED
-                booking.save(update_fields=["status"])
+                slots_cancelled = []
+                for booking in bookings:
+                    booking.status = Booking.STATUS_REJECTED
+                    booking.save(update_fields=["status"])
+                    slots_cancelled.append(booking.slot_id)
                 
                 logger.info(
-                    f"Booking cancelled: {booking.unique_id} by user {request.user.id}"
+                    f"Booking cancelled: {booking_id} by user {request.user.id} "
+                    f"({len(slots_cancelled)} slots: {slots_cancelled})"
                 )
             
-            # Mark slot as available in Redis
-            RedisClient.mark_slot_available(
-                ground_id=booking.ground_id,
-                date=str(booking.date),
-                slot_id=booking.slot_id,
-            )
+            # Mark all slots as available in Redis
+            for booking in bookings:
+                RedisClient.mark_slot_available(
+                    ground_id=booking.ground_id,
+                    date=str(booking.date),
+                    slot_id=booking.slot_id,
+                )
             
             return Response(
                 {
-                    "message": "Booking cancelled successfully",
-                    "booking_id": booking.unique_id,
+                    "message": f"Booking cancelled successfully ({len(slots_cancelled)} slot(s))",
+                    "booking_id": booking_id,
+                    "slots_cancelled": slots_cancelled,
                 },
                 status=status.HTTP_200_OK,
             )
