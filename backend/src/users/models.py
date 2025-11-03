@@ -56,8 +56,8 @@ class User(AbstractBaseUser, PermissionsMixin):
     """
 
     name = models.CharField(max_length=100)
-    email = models.EmailField(max_length=100, unique=True, db_index=True)
-    sort_key = models.CharField(max_length=20, unique=True)
+    email = models.EmailField(max_length=50, unique=True)
+    sort_key = models.CharField(max_length=20, db_index=True, null=False)
 
     is_admin = models.BooleanField(default=False)
     is_staff = models.BooleanField(default=False)
@@ -82,7 +82,6 @@ class User(AbstractBaseUser, PermissionsMixin):
         verbose_name_plural = "Users"
         constraints = [
             models.UniqueConstraint(fields=["email"], name="unique_user_email"),
-            models.UniqueConstraint(fields=["sort_key"], name="unique_user_sort_key"),
         ]
 
     def __str__(self) -> str:  # pragma: no cover - trivial
