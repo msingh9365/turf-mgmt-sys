@@ -28,6 +28,7 @@ env = environ.Env(
     GOOGLE_CLIENT_ID_ANDROID=(str, "stub_android_id"),
     GOOGLE_CLIENT_ID_WEB=(str, "stub_web_id"),
     GOOGLE_CLIENT_SECRET_WEB=(str, "stub_web_secret"),
+    GOOGLE_CALLBACK_URL=(str, "http://localhost:8000/accounts/google/login/callback/"),
     SUPABASE_URL=(str, ""),
     SUPABASE_KEY=(str, ""),
     SUPABASE_JWT_SECRET=(str, ""),
@@ -51,11 +52,16 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "django.contrib.sites",
 
     # Third-party
     "rest_framework",
     "rest_framework.authtoken",
     "corsheaders",
+    "allauth",
+    "allauth.account",
+    "allauth.socialaccount",
+    "allauth.socialaccount.providers.google",
 
     # Local apps
     "users",
@@ -70,6 +76,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "allauth.account.middleware.AccountMiddleware",
 ]
 
 ROOT_URLCONF = "core.urls"
@@ -143,7 +150,19 @@ AUTH_USER_MODEL = "users.User"
 AUTHENTICATION_BACKENDS = (
     "users.authentication.EmailBackend",
     "django.contrib.auth.backends.ModelBackend",
+    "allauth.account.auth_backends.AuthenticationBackend",
 )
+
+# Site ID for django-allauth
+SITE_ID = 1
+
+# Django Allauth settings
+ACCOUNT_EMAIL_VERIFICATION = "none"  # Skip email verification for simplicity
+ACCOUNT_LOGIN_METHODS = {'email'}
+ACCOUNT_SIGNUP_FIELDS = ['email*', 'password1*', 'password2*']
+ACCOUNT_USER_MODEL_USERNAME_FIELD = None
+ACCOUNT_USER_MODEL_EMAIL_FIELD = "email"
+SOCIALACCOUNT_AUTO_SIGNUP = True
 
 # DRF configuration
 REST_FRAMEWORK = {
@@ -184,3 +203,17 @@ ALLOWED_EMAIL_DOMAIN = env("ALLOWED_EMAIL_DOMAIN")
 GOOGLE_CLIENT_ID_ANDROID = env("GOOGLE_CLIENT_ID_ANDROID")
 GOOGLE_CLIENT_ID_WEB = env("GOOGLE_CLIENT_ID_WEB")
 GOOGLE_CLIENT_SECRET_WEB = env("GOOGLE_CLIENT_SECRET_WEB")
+GOOGLE_CALLBACK_URL = env("GOOGLE_CALLBACK_URL")
+
+# Social account providers configuration
+SOCIALACCOUNT_PROVIDERS = {
+    "google": {
+        "SCOPE": ["profile", "email"],
+        "AUTH_PARAMS": {"access_type": "online"},
+        "APP": {
+            "client_id": GOOGLE_CLIENT_ID_WEB,
+            "secret": GOOGLE_CLIENT_SECRET_WEB,
+            "key": "",
+        },
+    }
+}
