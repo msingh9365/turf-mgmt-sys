@@ -129,7 +129,9 @@ AUTH_PASSWORD_VALIDATORS = [
 
 # Internationalization
 LANGUAGE_CODE = "en-us"
-TIME_ZONE = "UTC"
+# Use the named IANA timezone for India (UTC+5:30). This is preferred over
+# fixed-offset tzinfos because it is explicit and future-proof.
+TIME_ZONE = "Asia/Kolkata"
 USE_I18N = True
 USE_TZ = True
 

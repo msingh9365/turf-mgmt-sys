@@ -4,6 +4,7 @@ Views for user registration, login (JWT), and profile.
 from __future__ import annotations
 
 from django.conf import settings
+from django.utils import timezone
 from rest_framework import permissions, status, generics
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
@@ -35,6 +36,11 @@ class LoginView(generics.GenericAPIView):
         serializer = self.get_serializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         user: User = serializer.validated_data["user"]
+        # Use Django's localtime() which converts aware UTC now to the
+        # timezone specified in settings.TIME_ZONE (now set to 'Asia/Kolkata').
+        now = timezone.localtime()
+        user.last_login = now
+        user.save(update_fields=["last_login"])
         tokens = TokenPairSerializer.for_user(user)
         return Response(tokens, status=status.HTTP_200_OK)
 
