@@ -28,6 +28,7 @@ env = environ.Env(
     GOOGLE_CLIENT_ID_ANDROID=(str, "stub_android_id"),
     GOOGLE_CLIENT_ID_WEB=(str, "stub_web_id"),
     GOOGLE_CLIENT_SECRET_WEB=(str, "stub_web_secret"),
+    GOOGLE_CALLBACK_URL=(str, "http://localhost:8000/accounts/google/login/callback/"),
     SUPABASE_URL=(str, ""),
     SUPABASE_KEY=(str, ""),
     SUPABASE_JWT_SECRET=(str, ""),
@@ -39,8 +40,11 @@ env = environ.Env(
 
 # Load .env if present at project root
 ENV_FILE = BASE_DIR / ".env"
-if ENV_FILE.exists():
-    environ.Env.read_env(str(ENV_FILE))
+LOCAL_ENV_FILE = BASE_DIR / ".env.local"
+
+for env_path in (ENV_FILE, LOCAL_ENV_FILE):
+    if env_path.exists():
+        environ.Env.read_env(str(env_path))
 
 DEBUG = env.bool("DEBUG")
 SECRET_KEY = env("DJANGO_SECRET_KEY") or "unsafe-dev-key-change-me"
@@ -130,7 +134,9 @@ AUTH_PASSWORD_VALIDATORS = [
 
 # Internationalization
 LANGUAGE_CODE = "en-us"
-TIME_ZONE = "UTC"
+# Use the named IANA timezone for India (UTC+5:30). This is preferred over
+# fixed-offset tzinfos because it is explicit and future-proof.
+TIME_ZONE = "Asia/Kolkata"
 USE_I18N = True
 USE_TZ = True
 
@@ -185,7 +191,7 @@ CORS_ALLOW_CREDENTIALS = True
 # Domain restriction for college emails
 ALLOWED_EMAIL_DOMAIN = env("ALLOWED_EMAIL_DOMAIN")
 
-# Google OAuth client configuration (used in future implementation)
+# Google OAuth client configuration for Android
 GOOGLE_CLIENT_ID_ANDROID = env("GOOGLE_CLIENT_ID_ANDROID")
 GOOGLE_CLIENT_ID_WEB = env("GOOGLE_CLIENT_ID_WEB")
 GOOGLE_CLIENT_SECRET_WEB = env("GOOGLE_CLIENT_SECRET_WEB")

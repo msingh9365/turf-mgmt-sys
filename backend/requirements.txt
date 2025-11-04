@@ -9,3 +9,6 @@ fakeredis==2.21.1
 pytest==7.4.3
 pytest-django==4.7.0
 # supabase==2.3.4
+
+# Google ID token verification for Android
+google-auth==2.35.0
