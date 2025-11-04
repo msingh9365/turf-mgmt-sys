@@ -176,6 +176,8 @@ ALLOWED_EMAIL_DOMAIN=@iitrpr.ac.in
 ```
 
 > **Important:** Replace the placeholder values above. The backend now reports a configuration error if `GOOGLE_CLIENT_ID_ANDROID` is left unset or uses the stub value.
+>
+> For real credentials, create `src/.env.local` (ignored by git), copy the keys there, and keep `src/.env` checked in with placeholders. Both files are loaded automatically.
 
 ## Security Features
 

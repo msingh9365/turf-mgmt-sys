@@ -36,8 +36,11 @@ env = environ.Env(
 
 # Load .env if present at project root
 ENV_FILE = BASE_DIR / ".env"
-if ENV_FILE.exists():
-    environ.Env.read_env(str(ENV_FILE))
+LOCAL_ENV_FILE = BASE_DIR / ".env.local"
+
+for env_path in (ENV_FILE, LOCAL_ENV_FILE):
+    if env_path.exists():
+        environ.Env.read_env(str(env_path))
 
 DEBUG = env.bool("DEBUG")
 SECRET_KEY = env("DJANGO_SECRET_KEY") or "unsafe-dev-key-change-me"
