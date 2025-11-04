@@ -52,16 +52,11 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-    "django.contrib.sites",
 
     # Third-party
     "rest_framework",
     "rest_framework.authtoken",
     "corsheaders",
-    "allauth",
-    "allauth.account",
-    "allauth.socialaccount",
-    "allauth.socialaccount.providers.google",
 
     # Local apps
     "users",
@@ -76,7 +71,6 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "allauth.account.middleware.AccountMiddleware",
 ]
 
 ROOT_URLCONF = "core.urls"
@@ -150,19 +144,7 @@ AUTH_USER_MODEL = "users.User"
 AUTHENTICATION_BACKENDS = (
     "users.authentication.EmailBackend",
     "django.contrib.auth.backends.ModelBackend",
-    "allauth.account.auth_backends.AuthenticationBackend",
 )
-
-# Site ID for django-allauth
-SITE_ID = 1
-
-# Django Allauth settings
-ACCOUNT_EMAIL_VERIFICATION = "none"  # Skip email verification for simplicity
-ACCOUNT_LOGIN_METHODS = {'email'}
-ACCOUNT_SIGNUP_FIELDS = ['email*', 'password1*', 'password2*']
-ACCOUNT_USER_MODEL_USERNAME_FIELD = None
-ACCOUNT_USER_MODEL_EMAIL_FIELD = "email"
-SOCIALACCOUNT_AUTO_SIGNUP = True
 
 # DRF configuration
 REST_FRAMEWORK = {
@@ -199,21 +181,6 @@ CORS_ALLOW_CREDENTIALS = True
 # Domain restriction for college emails
 ALLOWED_EMAIL_DOMAIN = env("ALLOWED_EMAIL_DOMAIN")
 
-# Google OAuth client configuration (used in future implementation)
+# Google OAuth client configuration for Android
 GOOGLE_CLIENT_ID_ANDROID = env("GOOGLE_CLIENT_ID_ANDROID")
 GOOGLE_CLIENT_ID_WEB = env("GOOGLE_CLIENT_ID_WEB")
-GOOGLE_CLIENT_SECRET_WEB = env("GOOGLE_CLIENT_SECRET_WEB")
-GOOGLE_CALLBACK_URL = env("GOOGLE_CALLBACK_URL")
-
-# Social account providers configuration
-SOCIALACCOUNT_PROVIDERS = {
-    "google": {
-        "SCOPE": ["profile", "email"],
-        "AUTH_PARAMS": {"access_type": "online"},
-        "APP": {
-            "client_id": GOOGLE_CLIENT_ID_WEB,
-            "secret": GOOGLE_CLIENT_SECRET_WEB,
-            "key": "",
-        },
-    }
-}

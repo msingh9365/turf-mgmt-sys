@@ -1,124 +1,188 @@
 """
-Google OAuth2 authentication views for the playground backend.
-Integrates django-allauth with JWT token generation.
+Google OAuth2 authentication for Android app.
+Verifies Google ID tokens and returns JWT tokens.
 """
 from __future__ import annotations
 
-from allauth.socialaccount.helpers import complete_social_login
-from allauth.socialaccount.models import SocialAccount
-from allauth.socialaccount.providers.google.views import GoogleOAuth2Adapter
-from allauth.socialaccount.providers.oauth2.client import OAuth2Client
-from django.contrib.auth import login
 from django.conf import settings
-from django.http import HttpRequest
+from django.utils import timezone
+from google.auth.transport import requests
+from google.oauth2 import id_token
 from rest_framework import status
+from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
-from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from users.models import User
 
 
-class GoogleLoginView(APIView):
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def google_sign_in_android(request):
     """
-    Google OAuth2 login view that returns JWT tokens.
-
-    This view handles the OAuth2 callback from Google and returns
-    access and refresh tokens for authenticated users.
+    Android Google Sign-In endpoint.
+    
+    Accepts an ID token from Google Sign-In on Android,
+    verifies it, and returns JWT tokens.
+    
+    Request body:
+    {
+        "id_token": "eyJhbGciOiJSUzI1NiIsImtpZCI6IjU5M..."
+    }
+    
+    Response (Success):
+    {
+        "access": "jwt_access_token",
+        "refresh": "jwt_refresh_token",
+        "user": {
+            "id": 123,
+            "email": "user@iitrpr.ac.in",
+            "name": "John Doe",
+            "sort_key": "entry_number"
+        },
+        "created": false
+    }
     """
+    token = request.data.get("id_token")
 
-    permission_classes = [AllowAny]
-    adapter_class = GoogleOAuth2Adapter
-    client_class = OAuth2Client
-    callback_url = settings.GOOGLE_CALLBACK_URL
+    if not token:
+        return Response(
+            {"error": "id_token is required"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
-    def get(self, request):
-        """Handle the OAuth2 callback from Google."""
-        # Get the authorization code from query parameters
-        code = request.GET.get('code')
-        if not code:
-            return Response(
-                {"error": "Authorization code not provided"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        try:
-            # Create adapter instance
-            adapter = self.adapter_class(request)
-            provider = adapter.get_provider()
-            client = self.client_class(
-                request,
-                provider.app.client_id,
-                provider.app.secret,
-                access_token_method=provider.get_access_token_method(),
-                access_token_url=provider.get_access_token_url(),
-                callback_url=self.callback_url,
-            )
-
-            # Exchange code for access token
-            token = client.get_access_token(code)
-
-            # Get user info from Google
-            login_url = provider.get_login_url(request, **{'process': 'login'})
-            social_login = provider.sociallogin_from_response(request, token.__dict__)
-
-            # Complete the social login
-            complete_social_login(request, social_login)
-
-            # Get the authenticated user
-            user = social_login.user
-
-            # Generate JWT tokens
-            refresh = RefreshToken.for_user(user)
-            access_token = str(refresh.access_token)
-            refresh_token = str(refresh)
-
-            # Return custom response with tokens
-            return Response(
-                {
-                    "user": {
-                        "id": user.id,
-                        "email": user.email,
-                        "name": user.name,
-                        "sort_key": user.sort_key,
-                    },
-                    "tokens": {
-                        "access": access_token,
-                        "refresh": refresh_token,
-                    },
-                    "message": "Successfully authenticated with Google",
-                },
-                status=status.HTTP_200_OK,
-            )
-
-        except Exception as e:
-            return Response(
-                {"error": f"Authentication failed: {str(e)}"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-
-class GoogleConnectView(APIView):
-    """
-    View to initiate Google OAuth2 login flow.
-
-    This returns the Google OAuth2 authorization URL that the frontend
-    should redirect the user to.
-    """
-
-    permission_classes = [AllowAny]
-
-    def get(self, request):
-        """Return Google OAuth2 authorization URL."""
-        # This is a simplified implementation
-        # In production, you'd want to generate the proper OAuth URL
-        # For now, we'll let the frontend handle the redirect to allauth URLs
-
+    # Ensure the token looks like a JWT before contacting Google
+    if token.count(".") != 2:
         return Response(
             {
-                "auth_url": "/accounts/google/login/",
-                "message": "Redirect to this URL to start Google authentication",
+                "error": "Invalid token format",
+                "detail": "Expected a JWT with three segments. Copy the full id_token returned by Google."
             },
-            status=status.HTTP_200_OK,
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    android_client_id = getattr(settings, "GOOGLE_CLIENT_ID_ANDROID", "").strip()
+    if not android_client_id or android_client_id == "stub_android_id":
+        return Response(
+            {
+                "error": "Server configuration error",
+                "detail": "Set GOOGLE_CLIENT_ID_ANDROID in the environment before using Google Sign-In."
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+    allowed_audiences = {android_client_id}
+
+    web_client_id = getattr(settings, "GOOGLE_CLIENT_ID_WEB", "").strip()
+    if web_client_id and web_client_id != "stub_web_id":
+        allowed_audiences.add(web_client_id)
+    
+    try:
+        # Verify the ID token with Google (signature, issuer, expiry)
+        idinfo = id_token.verify_oauth2_token(
+            token,
+            requests.Request(),
+            audience=None
+        )
+
+        token_audience = idinfo.get('aud')
+        if token_audience not in allowed_audiences:
+            return Response(
+                {
+                    "error": "Invalid audience",
+                    "detail": "Token was not issued for a configured client ID."
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get user info from token
+        email = idinfo.get('email')
+        name = (
+            idinfo.get('name')
+            or idinfo.get('given_name')
+            or idinfo.get('family_name')
+            or ""
+        )
+        google_id = idinfo.get('sub')
+        email_verified = idinfo.get('email_verified', False)
+
+        if not name and email:
+            name = email.split('@')[0]
+        
+        if not email:
+            return Response(
+                {"error": "Email not provided by Google"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if not email_verified:
+            return Response(
+                {"error": "Email not verified by Google"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check email domain
+        if not email.endswith(settings.ALLOWED_EMAIL_DOMAIN):
+            return Response(
+                {"error": f"Only {settings.ALLOWED_EMAIL_DOMAIN} emails are allowed"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        default_sort_key = email[:7]
+        # Get or create user
+        user, created = User.objects.get_or_create(
+            email=email,
+            defaults={
+                'name': name,
+                'sort_key': default_sort_key,  # Use email prefix as default sort_key
+            }
+        )
+        
+        # Update mutable fields when needed
+        now = timezone.now()
+        fields_to_update: list[str] = []
+
+        if name and user.name != name:
+            user.name = name
+            fields_to_update.append('name')
+
+        if not user.sort_key:
+            user.sort_key = default_sort_key
+            fields_to_update.append('sort_key')
+
+        user.last_login = now
+        fields_to_update.append('last_login')
+
+        if fields_to_update:
+            user.save(update_fields=fields_to_update)
+        
+        # Generate JWT tokens
+        refresh = RefreshToken.for_user(user)
+        
+        return Response(
+            {
+                "access": str(refresh.access_token),
+                "refresh": str(refresh),
+                "user": {
+                    "id": user.id,
+                    "email": user.email,
+                    "name": user.name,
+                    "sort_key": user.sort_key,
+                },
+                "created": created,
+            },
+            status=status.HTTP_200_OK
+        )
+        
+    except ValueError as e:
+        # Invalid token
+        return Response(
+            {"error": f"Invalid token: {str(e)}"},
+            status=status.HTTP_401_UNAUTHORIZED
+        )
+    except Exception as e:
+        return Response(
+            {"error": f"Authentication failed: {str(e)}"},
+            status=status.HTTP_400_BAD_REQUEST
         )
