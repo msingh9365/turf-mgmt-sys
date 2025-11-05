@@ -9,10 +9,26 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 from rest_framework import status
 
-from bookings.models import Booking
+from bookings.models import Booking, Booked_Details, Slot, Ground
 from core.redis_client import RedisClient
 
 User = get_user_model()
+
+
+def _api_create_booking(client, ground, slot_ids, date, players, metadata=None):
+    """Helper to create a booking via API and return response payload."""
+    payload = {
+        "ground_id": ground.ground_id,
+        "slot_id": slot_ids,
+        "date": str(date),
+        "players": players,
+    }
+    if metadata is not None:
+        payload["metadata"] = metadata
+
+    response = client.post("/api/bookings/", payload, format="json")
+    assert response.status_code == status.HTTP_200_OK
+    return response.data
 
 
 @pytest.fixture
@@ -27,7 +43,7 @@ def test_user(db):
     user = User.objects.create_user(
         email="test@iitrpr.ac.in",
         name="Test User",
-        sort_key="TEST001",
+        sort_key="TEST",
         password="testpass123",
     )
     return user
@@ -39,7 +55,7 @@ def another_user(db):
     user = User.objects.create_user(
         email="another@iitrpr.ac.in",
         name="Another User",
-        sort_key="TEST002",
+        sort_key="ANOTHER",
         password="testpass123",
     )
     return user
@@ -56,15 +72,52 @@ def authenticated_client(api_client, test_user):
 class TestBookingCreation:
     """Tests for booking creation with Redis locking."""
     
-    def test_successful_booking_creation(self, authenticated_client, test_user, fake_redis_client):
+    def test_creator_is_auto_included_when_missing(self, authenticated_client, test_user, fake_redis_client, ground):
+        """If creator isn't in players payload, ensure they are auto-added to Booked_Details and response."""
+        tomorrow = (timezone.now() + timedelta(days=1)).date()
+
+        # Do not include the creator in players list
+        data = {
+            "ground_id": ground.ground_id,
+            "slot_id": [5, 6],
+            "date": str(tomorrow),
+            "players": [
+                {"name": "Guest One", "email": "guest1@example.com"},
+                {"name": "Guest Two", "email": "guest2@example.com"},
+            ],
+            "metadata": {"note": "team booking"},
+        }
+
+        response = authenticated_client.post("/api/bookings/", data, format="json")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert "players" in response.data
+
+        # Creator should be present and marked is_user=True
+        emails = {p["email"] for p in response.data["players"]}
+        assert test_user.email.lower() in emails
+
+        creator_entry = next(p for p in response.data["players"] if p["email"] == test_user.email.lower())
+        assert creator_entry["is_user"] is True
+
+        # Verify Booked_Details created for creator across all slots
+        booking_id = response.data["booking_id"]
+        details = Booked_Details.objects.filter(booking__booking_id=booking_id, player_email=test_user.email.lower())
+        assert details.count() == 2
+        assert set(details.values_list("slot_id", flat=True)) == {5, 6}
+
+    def test_successful_booking_creation(self, authenticated_client, test_user, fake_redis_client, ground):
         """Test successful booking creation with valid data."""
         tomorrow = (timezone.now() + timedelta(days=1)).date()
         
         data = {
-            "ground_id": 1,
+            "ground_id": ground.ground_id,
             "slot_id": [5],  # Now expects a list
             "date": str(tomorrow),
-            "player_ids": [2, 3, 4],
+            "players": [
+                {"name": "Test User", "email": test_user.email},
+                {"name": "Guest Player", "email": "guest1@example.com"},
+            ],
             "metadata": {"team_name": "Test Team"},
         }
         
@@ -75,28 +128,50 @@ class TestBookingCreation:
         assert response.data["status"] == "Done"
         assert "slots_booked" in response.data
         assert response.data["slots_booked"] == [5]
+        assert len(response.data["players"]) == 2
+        assert response.data["players"][0]["sort_key"] == "TEST"
+        assert response.data["players"][0]["is_user"] is True
+        assert response.data["players"][1]["is_user"] is False
         
         # Verify booking exists in database
-        bookings = Booking.objects.filter(booking_id=response.data["booking_id"])
-        assert bookings.count() == 1
-        booking = bookings.first()
+        booking = Booking.objects.get(booking_id=response.data["booking_id"])
         assert booking.user == test_user
-        assert booking.ground_id == 1
-        assert booking.slot_id == 5
         assert booking.status == Booking.STATUS_DONE
+        assert booking.metadata["team_name"] == "Test Team"
+        assert booking.metadata["slots"] == [5]
+        assert len(booking.metadata["players"]) == 2
+        assert booking.metadata["ground_id"] == ground.ground_id
+        assert booking.metadata["ground_name"] == ground.ground_name
+
+        details = Booked_Details.objects.filter(booking=booking)
+        assert details.count() == 2  # 2 players x 1 slot
+        detail = details.first()
+        assert detail.player_email in {test_user.email.lower(), "guest1@example.com"}
+        assert detail.ground == ground
+        assert detail.slot_id == 5
+        assert detail.is_user in {True, False}
+
+        slot = Slot.objects.get(ground=ground, date=tomorrow, slot_id=5)
+        assert slot.booked is True
         
         # Verify Redis slot is marked as booked
-        slot_key = f"slot:1:{tomorrow}:5"
+        slot_key = f"slot:{ground.ground_id}:{tomorrow}:5"
         assert fake_redis_client.get(slot_key) == b"booked"
     
-    def test_multi_slot_booking_creation(self, authenticated_client, test_user, fake_redis_client):
+    def test_multi_slot_booking_creation(self, authenticated_client, test_user, fake_redis_client, ground):
         """Test successful booking creation with multiple slots sharing same booking_id."""
         tomorrow = (timezone.now() + timedelta(days=1)).date()
+        secondary_ground = Ground.objects.create(ground_name="Practice Field", sport=ground.sport)
         
         data = {
-            "ground_id": 2,
+            "ground_id": secondary_ground.ground_id,
             "slot_id": [3, 4, 5],  # Multiple slots
             "date": str(tomorrow),
+            "players": [
+                {"name": "Test User", "email": test_user.email},
+                {"name": "Guest Player", "email": "guest2@example.com"},
+                {"name": "Guest Player 2", "email": "guest3@example.com"},
+            ],
             "metadata": {"team_name": "Hostel 5 FC", "notes": "Final match"},
         }
         
@@ -109,32 +184,35 @@ class TestBookingCreation:
         assert response.data["slots_booked"] == [3, 4, 5]
         assert "3 slot(s)" in response.data["message"]
         
-        # Verify all 3 bookings exist in database with SAME booking_id
-        booking_id = response.data["booking_id"]
-        bookings = Booking.objects.filter(booking_id=booking_id).order_by('slot_id')
-        assert bookings.count() == 3
-        
-        # Verify each booking has correct slot and same booking_id
-        for idx, booking in enumerate(bookings):
-            assert booking.booking_id == booking_id
-            assert booking.user == test_user
-            assert booking.ground_id == 2
-            assert booking.slot_id == [3, 4, 5][idx]
-            assert booking.status == Booking.STATUS_DONE
+        # Verify booking exists and details captured
+        booking = Booking.objects.get(booking_id=response.data["booking_id"])
+        assert booking.metadata["slots"] == [3, 4, 5]
+        assert len(booking.metadata["players"]) == 3
+        assert booking.metadata["ground_id"] == secondary_ground.ground_id
+        assert booking.metadata["ground_name"] == secondary_ground.ground_name
+
+        details = Booked_Details.objects.filter(booking=booking)
+        assert details.count() == 9  # 3 slots * 3 players
+        assert {detail.slot_id for detail in details} == {3, 4, 5}
+
+        slots = Slot.objects.filter(ground=secondary_ground, date=tomorrow, slot_id__in=[3, 4, 5])
+        assert slots.count() == 3
+        assert all(slot.booked for slot in slots)
         
         # Verify all slots are marked as booked in Redis
         for slot in [3, 4, 5]:
-            slot_key = f"slot:2:{tomorrow}:{slot}"
+            slot_key = f"slot:{secondary_ground.ground_id}:{tomorrow}:{slot}"
             assert fake_redis_client.get(slot_key) == b"booked"
     
-    def test_booking_past_date_rejected(self, authenticated_client, fake_redis_client):
+    def test_booking_past_date_rejected(self, authenticated_client, fake_redis_client, ground, test_user):
         """Test that booking in the past is rejected."""
         yesterday = (timezone.now() - timedelta(days=1)).date()
         
         data = {
-            "ground_id": 1,
-            "slot_id": 5,
+            "ground_id": ground.ground_id,
+            "slot_id": [5],
             "date": str(yesterday),
+            "players": [{"name": "Test User", "email": test_user.email}],
         }
         
         response = authenticated_client.post("/api/bookings/", data, format="json")
@@ -142,14 +220,15 @@ class TestBookingCreation:
         assert response.status_code == status.HTTP_400_BAD_REQUEST
         assert "past" in str(response.data).lower()
     
-    def test_booking_too_far_advance_rejected(self, authenticated_client, fake_redis_client):
+    def test_booking_too_far_advance_rejected(self, authenticated_client, fake_redis_client, ground, test_user):
         """Test that booking more than 14 days in advance is rejected."""
         far_future = (timezone.now() + timedelta(days=15)).date()
         
         data = {
-            "ground_id": 1,
-            "slot_id": 5,
+            "ground_id": ground.ground_id,
+            "slot_id": [5],
             "date": str(far_future),
+            "players": [{"name": "Test User", "email": test_user.email}],
         }
         
         response = authenticated_client.post("/api/bookings/", data, format="json")
@@ -157,24 +236,25 @@ class TestBookingCreation:
         assert response.status_code == status.HTTP_400_BAD_REQUEST
         assert "14 days" in str(response.data)
     
-    def test_double_booking_prevention(self, authenticated_client, test_user, fake_redis_client):
+    def test_double_booking_prevention(self, authenticated_client, test_user, fake_redis_client, ground):
         """Test that double booking is prevented."""
         tomorrow = (timezone.now() + timedelta(days=1)).date()
         
-        # Create first booking
-        Booking.objects.create(
-            user=test_user,
-            ground_id=1,
-            slot_id=5,
-            date=tomorrow,
-            status=Booking.STATUS_DONE,
+        # Create first booking via API to populate related tables
+        _api_create_booking(
+            authenticated_client,
+            ground,
+            [5],
+            tomorrow,
+            [{"name": "Test User", "email": test_user.email}],
         )
         
         # Try to create duplicate booking
         data = {
-            "ground_id": 1,
+            "ground_id": ground.ground_id,
             "slot_id": [5],
             "date": str(tomorrow),
+            "players": [{"name": "Test User", "email": test_user.email}],
         }
         
         response = authenticated_client.post("/api/bookings/", data, format="json")
@@ -182,18 +262,19 @@ class TestBookingCreation:
         assert response.status_code == status.HTTP_409_CONFLICT
         assert "already booked" in response.data["error"].lower()
     
-    def test_lock_conflict_returns_409(self, authenticated_client, test_user, fake_redis_client):
+    def test_lock_conflict_returns_409(self, authenticated_client, test_user, fake_redis_client, ground):
         """Test that concurrent booking attempt returns 409 when lock is held."""
         tomorrow = (timezone.now() + timedelta(days=1)).date()
         
         # Simulate another user holding the lock
-        lock_key = f"lock:slot:1:{tomorrow}:5"
+        lock_key = f"lock:slot:{ground.ground_id}:{tomorrow}:5"
         fake_redis_client.set(lock_key, "999", ex=10)  # Different user ID
         
         data = {
-            "ground_id": 1,
+            "ground_id": ground.ground_id,
             "slot_id": [5],
             "date": str(tomorrow),
+            "players": [{"name": "Test User", "email": test_user.email}],
         }
         
         response = authenticated_client.post("/api/bookings/", data, format="json")
@@ -201,14 +282,15 @@ class TestBookingCreation:
         assert response.status_code == status.HTTP_409_CONFLICT
         assert "being booked" in response.data["error"].lower()
     
-    def test_authentication_required(self, api_client, fake_redis_client):
+    def test_authentication_required(self, api_client, fake_redis_client, ground):
         """Test that authentication is required for booking."""
         tomorrow = (timezone.now() + timedelta(days=1)).date()
         
         data = {
-            "ground_id": 1,
-            "slot_id": 5,
+            "ground_id": ground.ground_id,
+            "slot_id": [5],
             "date": str(tomorrow),
+            "players": [{"name": "Guest", "email": "guest@example.com"}],
         }
         
         response = api_client.post("/api/bookings/", data, format="json")
@@ -220,25 +302,26 @@ class TestBookingCreation:
 class TestBookingRetrieval:
     """Tests for retrieving user bookings."""
     
-    def test_get_my_bookings(self, authenticated_client, test_user, fake_redis_client):
+    def test_get_my_bookings(self, authenticated_client, test_user, fake_redis_client, ground):
         """Test retrieving bookings for authenticated user."""
         tomorrow = (timezone.now() + timedelta(days=1)).date()
+        day_after = (timezone.now() + timedelta(days=2)).date()
         
-        # Create test bookings
-        booking1 = Booking.objects.create(
-            user=test_user,
-            ground_id=1,
-            slot_id=5,
-            date=tomorrow,
-            status=Booking.STATUS_DONE,
+        booking1 = _api_create_booking(
+            authenticated_client,
+            ground,
+            [5],
+            tomorrow,
+            [{"name": "Test User", "email": test_user.email}],
         )
-        
-        booking2 = Booking.objects.create(
-            user=test_user,
-            ground_id=2,
-            slot_id=7,
-            date=tomorrow,
-            status=Booking.STATUS_DONE,
+
+        second_ground = Ground.objects.create(ground_name="Secondary Turf", sport=ground.sport)
+        booking2 = _api_create_booking(
+            authenticated_client,
+            second_ground,
+            [7],
+            day_after,
+            [{"name": "Test User", "email": test_user.email}],
         )
         
         response = authenticated_client.get("/api/bookings/my/")
@@ -247,8 +330,8 @@ class TestBookingRetrieval:
         assert len(response.data) == 2
         
         booking_ids = [b["booking_id"] for b in response.data]
-        assert booking1.booking_id in booking_ids
-        assert booking2.booking_id in booking_ids
+        assert booking1["booking_id"] in booking_ids
+        assert booking2["booking_id"] in booking_ids
     
     def test_get_my_bookings_empty(self, authenticated_client, fake_redis_client):
         """Test retrieving bookings when user has none."""
@@ -257,94 +340,115 @@ class TestBookingRetrieval:
         assert response.status_code == status.HTTP_200_OK
         assert len(response.data) == 0
     
-    def test_user_only_sees_own_bookings(self, authenticated_client, test_user, another_user, fake_redis_client):
+    def test_user_only_sees_own_bookings(self, authenticated_client, test_user, another_user, fake_redis_client, ground, api_client):
         """Test that users only see their own bookings."""
         tomorrow = (timezone.now() + timedelta(days=1)).date()
         
         # Create booking for test_user
-        user_booking = Booking.objects.create(
-            user=test_user,
-            ground_id=1,
-            slot_id=5,
-            date=tomorrow,
-            status=Booking.STATUS_DONE,
+        user_booking = _api_create_booking(
+            authenticated_client,
+            ground,
+            [5],
+            tomorrow,
+            [{"name": "Test User", "email": test_user.email}],
         )
         
-        # Create booking for another_user
-        other_booking = Booking.objects.create(
-            user=another_user,
-            ground_id=1,
-            slot_id=6,
-            date=tomorrow,
-            status=Booking.STATUS_DONE,
+        # Create booking for another_user via separate authenticated client
+        client_for_other = APIClient()
+        client_for_other.force_authenticate(user=another_user)
+        _api_create_booking(
+            client_for_other,
+            ground,
+            [6],
+            tomorrow,
+            [{"name": "Another User", "email": another_user.email}],
         )
         
         response = authenticated_client.get("/api/bookings/my/")
         
         assert response.status_code == status.HTTP_200_OK
         assert len(response.data) == 1
-        assert response.data[0]["booking_id"] == user_booking.booking_id
+        assert response.data[0]["booking_id"] == user_booking["booking_id"]
 
 
 @pytest.mark.django_db
 class TestBookingCancellation:
     """Tests for booking cancellation."""
     
-    def test_successful_cancellation(self, authenticated_client, test_user, fake_redis_client):
+    def test_successful_cancellation(self, authenticated_client, test_user, fake_redis_client, ground):
         """Test successful booking cancellation."""
         tomorrow = (timezone.now() + timedelta(days=1)).date()
         
-        booking = Booking.objects.create(
-            user=test_user,
-            ground_id=1,
-            slot_id=5,
-            date=tomorrow,
-            status=Booking.STATUS_DONE,
+        booking_resp = _api_create_booking(
+            authenticated_client,
+            ground,
+            [5],
+            tomorrow,
+            [{"name": "Test User", "email": test_user.email}],
         )
-        
-        # Mark slot as booked in Redis
-        slot_key = f"slot:1:{tomorrow}:5"
-        fake_redis_client.set(slot_key, "booked")
-        
-        response = authenticated_client.delete(f"/api/bookings/{booking.booking_id}/")
+        booking_id = booking_resp["booking_id"]
+        slot_key = f"slot:{ground.ground_id}:{tomorrow}:5"
+        assert fake_redis_client.get(slot_key) == b"booked"
+
+        response = authenticated_client.delete(f"/api/bookings/{booking_id}/")
         
         assert response.status_code == status.HTTP_200_OK
         assert "cancelled successfully" in response.data["message"].lower()
         
         # Verify booking status updated
-        booking.refresh_from_db()
+        booking = Booking.objects.get(booking_id=booking_id)
         assert booking.status == Booking.STATUS_REJECTED
+        
+        slot = Slot.objects.get(ground=ground, date=tomorrow, slot_id=5)
+        assert slot.booked is False
         
         # Verify Redis slot is marked as available
         assert fake_redis_client.get(slot_key) == b"available"
     
-    def test_cannot_cancel_others_booking(self, authenticated_client, test_user, another_user, fake_redis_client):
+    def test_cannot_cancel_others_booking(self, authenticated_client, test_user, another_user, fake_redis_client, ground):
         """Test that user cannot cancel another user's booking."""
         tomorrow = (timezone.now() + timedelta(days=1)).date()
         
-        booking = Booking.objects.create(
-            user=another_user,
-            ground_id=1,
-            slot_id=5,
-            date=tomorrow,
-            status=Booking.STATUS_DONE,
+        client_for_other = APIClient()
+        client_for_other.force_authenticate(user=another_user)
+        booking_resp = _api_create_booking(
+            client_for_other,
+            ground,
+            [5],
+            tomorrow,
+            [{"name": "Another User", "email": another_user.email}],
         )
         
-        response = authenticated_client.delete(f"/api/bookings/{booking.booking_id}/")
+        response = authenticated_client.delete(f"/api/bookings/{booking_resp['booking_id']}/")
         
         assert response.status_code == status.HTTP_403_FORBIDDEN
         assert "own bookings" in response.data["error"].lower()
     
-    def test_cannot_cancel_past_booking(self, authenticated_client, test_user, fake_redis_client):
+    def test_cannot_cancel_past_booking(self, authenticated_client, test_user, fake_redis_client, ground):
         """Test that past bookings cannot be cancelled."""
         yesterday = (timezone.now() - timedelta(days=1)).date()
         
         booking = Booking.objects.create(
             user=test_user,
-            ground_id=1,
-            slot_id=5,
             date=yesterday,
             status=Booking.STATUS_DONE,
+            metadata={
+                "slots": [5],
+                "players": [{"name": "Test User", "email": test_user.email}],
+                "ground_id": ground.ground_id,
+                "ground_name": ground.ground_name,
+            },
+        )
+        Slot.objects.create(ground=ground, date=yesterday, slot_id=5, booked=True)
+        Booked_Details.objects.create(
+            booking=booking,
+            player_name="Test User",
+            player_email=test_user.email.lower(),
+            sort_key="TEST",
+            ground=ground,
+            is_user=True,
+            date=yesterday,
+            slot_id=5,
         )
         
         response = authenticated_client.delete(f"/api/bookings/{booking.booking_id}/")
@@ -352,16 +456,31 @@ class TestBookingCancellation:
         assert response.status_code == status.HTTP_400_BAD_REQUEST
         assert "cannot cancel past" in response.data["error"].lower()
     
-    def test_cannot_cancel_rejected_booking(self, authenticated_client, test_user, fake_redis_client):
+    def test_cannot_cancel_rejected_booking(self, authenticated_client, test_user, fake_redis_client, ground):
         """Test that already rejected bookings cannot be cancelled again."""
         tomorrow = (timezone.now() + timedelta(days=1)).date()
         
         booking = Booking.objects.create(
             user=test_user,
-            ground_id=1,
-            slot_id=5,
             date=tomorrow,
             status=Booking.STATUS_REJECTED,
+            metadata={
+                "slots": [5],
+                "players": [{"name": "Test User", "email": test_user.email}],
+                "ground_id": ground.ground_id,
+                "ground_name": ground.ground_name,
+            },
+        )
+        Slot.objects.create(ground=ground, date=tomorrow, slot_id=5, booked=False)
+        Booked_Details.objects.create(
+            booking=booking,
+            player_name="Test User",
+            player_email=test_user.email.lower(),
+            sort_key="TEST",
+            ground=ground,
+            is_user=True,
+            date=tomorrow,
+            slot_id=5,
         )
         
         response = authenticated_client.delete(f"/api/bookings/{booking.booking_id}/")
@@ -373,6 +492,228 @@ class TestBookingCancellation:
         response = authenticated_client.delete("/api/bookings/INVALID123/")
         
         assert response.status_code == status.HTTP_404_NOT_FOUND
+
+
+@pytest.mark.django_db
+class TestCancelEndpoint:
+    """Tests for the dedicated cancel endpoint POST /api/bookings/{id}/cancel/"""
+    
+    def test_cancel_endpoint_successful(self, authenticated_client, test_user, fake_redis_client, ground):
+        """Test successful cancellation via POST cancel endpoint."""
+        tomorrow = (timezone.now() + timedelta(days=1)).date()
+        
+        booking_resp = _api_create_booking(
+            authenticated_client,
+            ground,
+            [5, 6],
+            tomorrow,
+            [{"name": "Test User", "email": test_user.email}],
+        )
+        booking_id = booking_resp["booking_id"]
+        
+        # Verify slots are booked
+        slot5 = Slot.objects.get(ground=ground, date=tomorrow, slot_id=5)
+        slot6 = Slot.objects.get(ground=ground, date=tomorrow, slot_id=6)
+        assert slot5.booked is True
+        assert slot6.booked is True
+        
+        response = authenticated_client.post(f"/api/bookings/{booking_id}/cancel/")
+        
+        assert response.status_code == status.HTTP_200_OK
+        assert "cancelled successfully" in response.data["message"].lower()
+        assert response.data["booking_id"] == booking_id
+        assert response.data["status"] == "Rejected"
+        assert set(response.data["slots_cancelled"]) == {5, 6}
+        
+        # Verify booking status updated
+        booking = Booking.objects.get(booking_id=booking_id)
+        assert booking.status == Booking.STATUS_REJECTED
+        
+        # Verify slots freed
+        slot5.refresh_from_db()
+        slot6.refresh_from_db()
+        assert slot5.booked is False
+        assert slot6.booked is False
+        
+        # Verify Redis cache updated
+        assert fake_redis_client.get(f"slot:{ground.ground_id}:{tomorrow}:5") == b"available"
+        assert fake_redis_client.get(f"slot:{ground.ground_id}:{tomorrow}:6") == b"available"
+    
+    def test_cancel_endpoint_multi_slot_booking(self, authenticated_client, test_user, fake_redis_client, ground):
+        """Test cancelling a booking with multiple slots via cancel endpoint."""
+        tomorrow = (timezone.now() + timedelta(days=1)).date()
+        
+        booking_resp = _api_create_booking(
+            authenticated_client,
+            ground,
+            [10, 11, 12, 13],
+            tomorrow,
+            [
+                {"name": "Player 1", "email": "p1@example.com"},
+                {"name": "Player 2", "email": "p2@example.com"},
+            ],
+        )
+        booking_id = booking_resp["booking_id"]
+        
+        response = authenticated_client.post(f"/api/bookings/{booking_id}/cancel/")
+        
+        assert response.status_code == status.HTTP_200_OK
+        assert len(response.data["slots_cancelled"]) == 4
+        assert set(response.data["slots_cancelled"]) == {10, 11, 12, 13}
+        
+        # Verify all slots freed
+        for slot_id in [10, 11, 12, 13]:
+            slot = Slot.objects.get(ground=ground, date=tomorrow, slot_id=slot_id)
+            assert slot.booked is False
+    
+    def test_cancel_endpoint_ownership_check(self, authenticated_client, test_user, another_user, fake_redis_client, ground):
+        """Test cancel endpoint rejects unauthorized cancellation."""
+        tomorrow = (timezone.now() + timedelta(days=1)).date()
+        
+        client_for_other = APIClient()
+        client_for_other.force_authenticate(user=another_user)
+        booking_resp = _api_create_booking(
+            client_for_other,
+            ground,
+            [5],
+            tomorrow,
+            [{"name": "Another User", "email": another_user.email}],
+        )
+        
+        # Try to cancel with different user
+        response = authenticated_client.post(f"/api/bookings/{booking_resp['booking_id']}/cancel/")
+        
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert "own bookings" in response.data["error"].lower()
+        
+        # Verify booking not cancelled
+        booking = Booking.objects.get(booking_id=booking_resp["booking_id"])
+        assert booking.status == Booking.STATUS_DONE
+    
+    def test_cancel_endpoint_past_booking(self, authenticated_client, test_user, fake_redis_client, ground):
+        """Test cancel endpoint rejects past bookings."""
+        yesterday = (timezone.now() - timedelta(days=1)).date()
+        
+        booking = Booking.objects.create(
+            user=test_user,
+            date=yesterday,
+            status=Booking.STATUS_DONE,
+            metadata={
+                "slots": [5],
+                "players": [{"name": "Test User", "email": test_user.email}],
+                "ground_id": ground.ground_id,
+                "ground_name": ground.ground_name,
+            },
+        )
+        Slot.objects.create(ground=ground, date=yesterday, slot_id=5, booked=True)
+        Booked_Details.objects.create(
+            booking=booking,
+            player_name="Test User",
+            player_email=test_user.email.lower(),
+            sort_key="TEST",
+            ground=ground,
+            is_user=True,
+            date=yesterday,
+            slot_id=5,
+        )
+        
+        response = authenticated_client.post(f"/api/bookings/{booking.booking_id}/cancel/")
+        
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert "cannot cancel past" in response.data["error"].lower()
+    
+    def test_cancel_endpoint_already_rejected(self, authenticated_client, test_user, fake_redis_client, ground):
+        """Test cancel endpoint handles already rejected bookings."""
+        tomorrow = (timezone.now() + timedelta(days=1)).date()
+        
+        booking = Booking.objects.create(
+            user=test_user,
+            date=tomorrow,
+            status=Booking.STATUS_REJECTED,
+            metadata={
+                "slots": [5],
+                "players": [{"name": "Test User", "email": test_user.email}],
+                "ground_id": ground.ground_id,
+                "ground_name": ground.ground_name,
+            },
+        )
+        Slot.objects.create(ground=ground, date=tomorrow, slot_id=5, booked=False)
+        Booked_Details.objects.create(
+            booking=booking,
+            player_name="Test User",
+            player_email=test_user.email.lower(),
+            sort_key="TEST",
+            ground=ground,
+            is_user=True,
+            date=tomorrow,
+            slot_id=5,
+        )
+        
+        response = authenticated_client.post(f"/api/bookings/{booking.booking_id}/cancel/")
+        
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert "cannot cancel booking with status" in response.data["error"].lower()
+    
+    def test_cancel_endpoint_nonexistent_booking(self, authenticated_client, fake_redis_client):
+        """Test cancel endpoint returns 404 for non-existent booking."""
+        response = authenticated_client.post("/api/bookings/INVALID123/cancel/")
+        
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+        assert "not found" in response.data["error"].lower()
+    
+    def test_cancel_endpoint_waitlist_booking(self, authenticated_client, test_user, fake_redis_client, ground):
+        """Test cancel endpoint rejects waitlist bookings."""
+        tomorrow = (timezone.now() + timedelta(days=1)).date()
+        
+        booking = Booking.objects.create(
+            user=test_user,
+            date=tomorrow,
+            status=Booking.STATUS_WAITLIST,
+            metadata={
+                "slots": [5],
+                "players": [{"name": "Test User", "email": test_user.email}],
+                "ground_id": ground.ground_id,
+                "ground_name": ground.ground_name,
+            },
+        )
+        Slot.objects.create(ground=ground, date=tomorrow, slot_id=5, booked=False)
+        Booked_Details.objects.create(
+            booking=booking,
+            player_name="Test User",
+            player_email=test_user.email.lower(),
+            sort_key="TEST",
+            ground=ground,
+            is_user=True,
+            date=tomorrow,
+            slot_id=5,
+        )
+        
+        response = authenticated_client.post(f"/api/bookings/{booking.booking_id}/cancel/")
+        
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert "cannot cancel booking with status" in response.data["error"].lower()
+    
+    def test_cancel_endpoint_idempotent_behavior(self, authenticated_client, test_user, fake_redis_client, ground):
+        """Test that cancel endpoint handles already-cancelled bookings gracefully."""
+        tomorrow = (timezone.now() + timedelta(days=1)).date()
+        
+        booking_resp = _api_create_booking(
+            authenticated_client,
+            ground,
+            [5],
+            tomorrow,
+            [{"name": "Test User", "email": test_user.email}],
+        )
+        booking_id = booking_resp["booking_id"]
+        
+        # First cancellation
+        response1 = authenticated_client.post(f"/api/bookings/{booking_id}/cancel/")
+        assert response1.status_code == status.HTTP_200_OK
+        
+        # Second cancellation attempt
+        response2 = authenticated_client.post(f"/api/bookings/{booking_id}/cancel/")
+        assert response2.status_code == status.HTTP_400_BAD_REQUEST
+        assert "rejected" in response2.data["error"].lower()
 
 
 @pytest.mark.django_db
@@ -470,8 +811,6 @@ class TestBookingModel:
         
         booking = Booking.objects.create(
             user=test_user,
-            ground_id=1,
-            slot_id=5,
             date=tomorrow,
         )
         
@@ -485,8 +824,6 @@ class TestBookingModel:
         
         booking = Booking.objects.create(
             user=test_user,
-            ground_id=1,
-            slot_id=5,
             date=tomorrow,
         )
         
@@ -499,8 +836,6 @@ class TestBookingModel:
         
         booking = Booking.objects.create(
             user=test_user,
-            ground_id=1,
-            slot_id=5,
             date=tomorrow,
             status=Booking.STATUS_DONE,
         )
@@ -520,8 +855,6 @@ class TestBookingModel:
         # Future booking can be cancelled
         future_booking = Booking.objects.create(
             user=test_user,
-            ground_id=1,
-            slot_id=5,
             date=tomorrow,
             status=Booking.STATUS_DONE,
         )
@@ -531,8 +864,6 @@ class TestBookingModel:
         # Past booking cannot be cancelled
         past_booking = Booking.objects.create(
             user=test_user,
-            ground_id=1,
-            slot_id=6,
             date=yesterday,
             status=Booking.STATUS_DONE,
         )
@@ -542,8 +873,6 @@ class TestBookingModel:
         # Rejected booking cannot be cancelled
         rejected_booking = Booking.objects.create(
             user=test_user,
-            ground_id=1,
-            slot_id=7,
             date=tomorrow,
             status=Booking.STATUS_REJECTED,
         )

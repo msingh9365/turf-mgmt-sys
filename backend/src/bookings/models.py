@@ -108,6 +108,10 @@ class Booked_Details(models.Model):
     """
     Booked_Details model for storing detailed booking information.
     """
+    player_name = models.CharField(
+        max_length=100,
+        db_column="player_name",
+    )
     booking = models.ForeignKey(
         'Booking',
         on_delete=models.CASCADE,
@@ -157,14 +161,12 @@ class Booked_Details(models.Model):
 
 class Booking(models.Model):
     """
-    Booking model representing a ground slot reservation.
-    
+    Booking model representing a ground reservation request.
+
     Schema matches the specified Supabase table:
-    - Unique_ID: Primary key (VARCHAR 50)
-    - Booking_ID: Auto-increment serial
+    - Booking_ID: Primary key (VARCHAR 50)
     - User_ID: Foreign key to User
     - Ground_ID: Foreign key to Ground (stored as INT)
-    - Slot_ID: Foreign key to Slot (stored as INT)
     - Date: Booking date
     - Metadata: JSONB field for additional data
     - Status: Booking status (Done, Rejected, Waitlist Processing)
@@ -199,7 +201,7 @@ class Booking(models.Model):
         db_column="User_ID",
         related_name="bookings",
     )
-    
+
     # Booking date
     date = models.DateField(
         db_column="Date",
@@ -258,7 +260,8 @@ class Booking(models.Model):
         return f"BK{date_str}{random_hex.upper()}"
     
     def __str__(self):
-        return f"Booking {self.booking_id} - {self.user.email} - Date {self.date}"
+        ground_display = self.metadata.get("ground_name") or self.metadata.get("ground_id") or "Unknown ground"
+        return f"Booking {self.booking_id} - {self.user.email} - {ground_display} - Date {self.date}"
     
     @property
     def is_active(self) -> bool:

@@ -6,6 +6,7 @@ import pytest
 from unittest.mock import patch
 from django.core.cache import cache
 from core.redis_client import RedisClient
+from bookings.models import Sport, Ground
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -43,3 +44,15 @@ def clean_redis():
 def fake_redis_client(clean_redis):
     """Provide direct access to redis client for tests that need it."""
     return clean_redis
+
+
+@pytest.fixture
+def sport(db):
+    """Create a default sport for grounds."""
+    return Sport.objects.create(sport_name="Football", min_player=5)
+
+
+@pytest.fixture
+def ground(db, sport):
+    """Create a default ground used in booking tests."""
+    return Ground.objects.create(ground_name="Main Turf", sport=sport)

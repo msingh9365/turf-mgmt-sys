@@ -1,10 +1,42 @@
-"""
-Serializers for booking endpoints.
-"""
-from datetime import datetime, timedelta
+"""Serializers for booking endpoints."""
+from datetime import timedelta
 from rest_framework import serializers
 from django.utils import timezone
-from .models import Booking
+
+from .models import Booking, Booked_Details
+
+
+class BookingPlayerSerializer(serializers.Serializer):
+    """Serializer for player information supplied during booking."""
+
+    name = serializers.CharField(max_length=100)
+    email = serializers.EmailField(max_length=100)
+
+    def validate_name(self, value: str) -> str:
+        """Ensure name is not blank after trimming."""
+        trimmed = value.strip()
+        if not trimmed:
+            raise serializers.ValidationError("Player name cannot be blank.")
+        return trimmed
+
+
+class BookedDetailSerializer(serializers.ModelSerializer):
+    """Serializer for booked detail entries associated with a booking."""
+
+    ground_id = serializers.IntegerField(source="ground.ground_id", read_only=True)
+
+    class Meta:
+        model = Booked_Details
+        fields = [
+            "player_name",
+            "player_email",
+            "sort_key",
+            "is_user",
+            "ground_id",
+            "date",
+            "slot_id",
+        ]
+        read_only_fields = fields
 
 
 class BookingSerializer(serializers.ModelSerializer):
@@ -15,21 +47,73 @@ class BookingSerializer(serializers.ModelSerializer):
     
     user_email = serializers.EmailField(source="user.email", read_only=True)
     user_name = serializers.CharField(source="user.name", read_only=True)
+    ground_id = serializers.SerializerMethodField()
+    ground_name = serializers.SerializerMethodField()
+    slots = serializers.SerializerMethodField()
+    players = serializers.SerializerMethodField()
+    details = BookedDetailSerializer(source="booked_details", many=True, read_only=True)
     
     class Meta:
         model = Booking
         fields = [
             "booking_id",
-            "ground_id",
-            "slot_id",
             "date",
             "status",
             "metadata",
             "created_at",
             "user_email",
             "user_name",
+            "ground_id",
+            "ground_name",
+            "slots",
+            "players",
+            "details",
         ]
-        read_only_fields = ["booking_id", "status", "created_at", "user_email", "user_name"]
+        read_only_fields = [
+            "booking_id",
+            "status",
+            "created_at",
+            "user_email",
+            "user_name",
+            "ground_id",
+            "ground_name",
+            "slots",
+            "players",
+            "details",
+        ]
+
+    def get_ground_id(self, obj):
+        metadata_ground = obj.metadata.get("ground_id") if isinstance(obj.metadata, dict) else None
+        if metadata_ground is not None:
+            return metadata_ground
+        detail = obj.booked_details.first()
+        return detail.ground.ground_id if detail and detail.ground else None
+
+    def get_ground_name(self, obj):
+        metadata_ground = obj.metadata.get("ground_name") if isinstance(obj.metadata, dict) else None
+        if metadata_ground:
+            return metadata_ground
+        detail = obj.booked_details.first()
+        return detail.ground.ground_name if detail and detail.ground else None
+
+    def get_slots(self, obj):
+        """Return sorted unique slot identifiers for the booking."""
+        slot_ids = {detail.slot_id for detail in obj.booked_details.all()}
+        return sorted(slot_ids)
+
+    def get_players(self, obj):
+        """Return unique players participating in the booking."""
+        players = {}
+        for detail in obj.booked_details.all():
+            email_key = detail.player_email.lower()
+            if email_key not in players:
+                players[email_key] = {
+                    "name": detail.player_name,
+                    "email": detail.player_email,
+                    "sort_key": detail.sort_key,
+                    "is_user": detail.is_user,
+                }
+        return list(players.values())
 
 
 class BookingCreateSerializer(serializers.Serializer):
@@ -46,11 +130,7 @@ class BookingCreateSerializer(serializers.Serializer):
         help_text="List of slot IDs to book (e.g., [3, 4, 5])"
     )
     date = serializers.DateField()
-    player_ids = serializers.ListField(
-        child=serializers.IntegerField(min_value=1),
-        required=False,
-        allow_empty=True,
-    )
+    players = BookingPlayerSerializer(many=True)
     metadata = serializers.JSONField(required=False, default=dict)
     
     def validate_date(self, value):
@@ -103,12 +183,18 @@ class BookingCreateSerializer(serializers.Serializer):
         Combine player_ids into metadata if provided.
         """
         metadata = attrs.get("metadata", {})
-        player_ids = attrs.pop("player_ids", None)
-        
-        if player_ids:
-            metadata["player_ids"] = player_ids
-        
-        attrs["metadata"] = metadata
+        attrs["metadata"] = metadata or {}
+        players = attrs.get("players", [])
+
+        if not players:
+            raise serializers.ValidationError({"players": "At least one player is required."})
+
+        emails = set()
+        for player in players:
+            email_key = player["email"].lower()
+            if email_key in emails:
+                raise serializers.ValidationError({"players": "Duplicate player email detected."})
+            emails.add(email_key)
         return attrs
 
 
