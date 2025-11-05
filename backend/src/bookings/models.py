@@ -10,6 +10,151 @@ from django.conf import settings
 from django.utils import timezone
 
 
+class Sport(models.Model):
+    """
+    Sport model defining different sports.
+    """
+    sport_id = models.AutoField(
+        primary_key=True,
+        db_column="Sport_ID",
+    )
+    
+    sport_name = models.CharField(
+        max_length=100,
+        db_column="Sport_Name",
+    )
+    
+    min_player = models.IntegerField(
+        db_column="Min_Player",
+    )
+    
+    class Meta:
+        db_table = "Sport"
+        verbose_name = "Sport"
+        verbose_name_plural = "Sports"
+    
+    def __str__(self):
+        return self.sport_name
+
+
+class Ground(models.Model):
+    """
+    Ground model representing a turf ground.
+    """
+    ground_id = models.AutoField(
+        primary_key=True,
+        db_column="Ground_ID",
+    )
+    
+    ground_name = models.CharField(
+        max_length=100,
+        db_column="Ground_Name",
+    )
+    
+    sport = models.ForeignKey(
+        Sport,
+        on_delete=models.RESTRICT,
+        db_column="Sport_ID",
+        related_name="grounds",
+    )
+    
+    class Meta:
+        db_table = "Ground"
+        verbose_name = "Ground"
+        verbose_name_plural = "Grounds"
+    
+    def __str__(self):
+        return f"{self.ground_name} ({self.sport.sport_name})"
+
+
+class Slot(models.Model):
+    """
+    Slot model representing time slots for grounds.
+    Slots are numbered based on 30-minute divisions of 24 hours (1-48).
+    """
+    slot_id = models.IntegerField(
+        db_column="Slot_ID",
+    )
+    
+    ground = models.ForeignKey(
+        Ground,
+        on_delete=models.CASCADE,
+        db_column="Ground_ID",
+        related_name="slots",
+    )
+    
+    date = models.DateField(
+        db_column="Date",
+    )
+    
+    booked = models.BooleanField(
+        default=False,
+        db_column="Booked",
+    )
+    
+    class Meta:
+        db_table = "Slot"
+        verbose_name = "Slot"
+        verbose_name_plural = "Slots"
+        
+        # Unique constraint for slot per ground per date
+        unique_together = ("ground", "date", "slot_id")
+    
+    def __str__(self):
+        return f"Slot {self.slot_id} - Ground {self.ground.ground_id} - {self.date}"
+
+
+class Booked_Details(models.Model):
+    """
+    Booked_Details model for storing detailed booking information.
+    """
+    booking = models.ForeignKey(
+        'Booking',
+        on_delete=models.CASCADE,
+        db_column="Booking_ID",
+        to_field="booking_id",
+        related_name="booked_details",
+    )
+    
+    player_email = models.CharField(
+        max_length=100,
+        db_column="player_email",
+    )
+    
+    sort_key = models.CharField(
+        max_length=20,
+        db_column="Sort_Key",
+    )
+    
+    ground = models.ForeignKey(
+        Ground,
+        on_delete=models.CASCADE,
+        db_column="Ground_ID",
+        related_name="booked_details",
+    )
+    
+    is_user = models.BooleanField(
+        default=False,
+        db_column="IsUser",
+    )
+    
+    date = models.DateField(
+        db_column="Date",
+    )
+    
+    slot_id = models.IntegerField(
+        db_column="Slot_ID",
+    )
+    
+    class Meta:
+        db_table = "Booked_Details"
+        verbose_name = "Booked Detail"
+        verbose_name_plural = "Booked Details"
+    
+    def __str__(self):
+        return f"Booked Detail - {self.booking.booking_id} - {self.player_email}"
+
+
 class Booking(models.Model):
     """
     Booking model representing a ground slot reservation.
@@ -37,17 +182,13 @@ class Booking(models.Model):
         (STATUS_WAITLIST, "Waitlist Processing"),
     ]
     
-    # Auto-increment primary key
-    id = models.BigAutoField(
-        primary_key=True,
-        db_column="id",
-    )
-    
     # Booking ID - shared across multiple slots in same booking
     booking_id = models.CharField(
         max_length=50,
+        primary_key=True,
         editable=False,
         db_index=True,
+        default='',
         db_column="Booking_ID",
     )
     
@@ -57,16 +198,6 @@ class Booking(models.Model):
         on_delete=models.RESTRICT,  # Prevent deletion of users with bookings
         db_column="User_ID",
         related_name="bookings",
-    )
-    
-    # Ground ID (references Ground table - not creating FK to avoid dependency)
-    ground_id = models.IntegerField(
-        db_column="Ground_ID",
-    )
-    
-    # Slot ID (references Slot table - not creating FK to avoid dependency)
-    slot_id = models.IntegerField(
-        db_column="Slot_ID",
     )
     
     # Booking date
@@ -104,17 +235,7 @@ class Booking(models.Model):
         # Composite index for efficient queries
         indexes = [
             models.Index(fields=["user", "date"]),
-            models.Index(fields=["ground_id", "date", "slot_id"]),
             models.Index(fields=["status"]),
-        ]
-        
-        # Ensure unique booking per slot per date
-        constraints = [
-            models.UniqueConstraint(
-                fields=["ground_id", "slot_id", "date"],
-                condition=models.Q(status="Done"),
-                name="unique_active_booking_per_slot",
-            )
         ]
     
     def save(self, *args, **kwargs):
@@ -137,7 +258,7 @@ class Booking(models.Model):
         return f"BK{date_str}{random_hex.upper()}"
     
     def __str__(self):
-        return f"Booking {self.booking_id} - {self.user.email} - Ground {self.ground_id}, Slot {self.slot_id}, Date {self.date}"
+        return f"Booking {self.booking_id} - {self.user.email} - Date {self.date}"
     
     @property
     def is_active(self) -> bool:
