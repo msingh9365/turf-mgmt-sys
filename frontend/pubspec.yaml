@@ -32,6 +32,10 @@ dependencies:
     sdk: flutter
   smooth_page_indicator: ^1.2.0
   video_player: ^2.10.0
+  http: ^1.2.0
+  shared_preferences: ^2.2.2
+  geolocator: ^12.0.0
+  permission_handler: ^11.0.1
   
 dev_dependencies:
   flutter_test:
@@ -60,5 +64,6 @@ flutter:
 
   assets:
     - assets/
+    - assets/event_posters/
 
 

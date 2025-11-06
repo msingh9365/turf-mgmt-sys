@@ -1,7 +1,14 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:smooth_page_indicator/smooth_page_indicator.dart';
 import 'package:video_player/video_player.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:geolocator/geolocator.dart';
+
+List<Map<String, String>> globalNotifications = [];
 
 // --- Shared navigation state controller ---
 class NavController extends ChangeNotifier {
@@ -42,6 +49,14 @@ final List<Map<String, dynamic>> globalBookings = [
   },
 ];
 void main() {
+  SystemChrome.setSystemUIOverlayStyle(
+    const SystemUiOverlayStyle(
+      statusBarColor: Colors.black, // Background color of status bar
+      statusBarIconBrightness:
+          Brightness.light, // Icons (battery, time) in white
+      statusBarBrightness: Brightness.dark, // For iOS devices
+    ),
+  );
   runApp(const MyApp());
 }
 
@@ -94,10 +109,14 @@ class _IntroScreenState extends State<IntroScreen> {
     });
   }
 
-  void _goToHome() {
+  void _goToHome() async {
+    final valid = await _authService.isTokenValid();
+
     if (!mounted) return;
+
     Navigator.of(context).pushReplacement(
       PageRouteBuilder(
+        //pageBuilder: (_, __, ___) => const LoginPage(),
         pageBuilder: (_, __, ___) => const HomePage(),
         transitionsBuilder: (_, anim, __, child) =>
             FadeTransition(opacity: anim, child: child),
@@ -138,6 +157,749 @@ class _IntroScreenState extends State<IntroScreen> {
   }
 }
 
+// ---------------------- Auth placeholder + helper UI ----------------------
+class AuthService {
+  Future<bool> login({required String email, required String password}) async {
+    try {
+      final uri = Uri.parse(
+        'https://turf-mgmt-sys.onrender.com/api/auth/login/',
+      );
+
+      final response = await http.post(
+        uri,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'email': email, 'password': password}),
+      );
+
+      print('Response status: ${response.statusCode}');
+      print('Response body: ${response.body}');
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+
+        // Detect success based on JWT token keys
+        if (data.containsKey('access') && data.containsKey('refresh')) {
+          final accessToken = data['access'];
+          final refreshToken = data['refresh'];
+          // store locally for later API calls
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('access_token', accessToken);
+          await prefs.setString('refresh_token', refreshToken);
+          return true;
+        } else {
+          return false;
+        }
+      } else {
+        return false;
+      }
+    } catch (e) {
+      print('Login error: $e');
+      return false;
+    }
+  }
+
+  Future<bool> register({
+    required String name,
+    required String email,
+    required String mobile,
+    required String password,
+  }) async {
+    try {
+      final uri = Uri.parse(
+        'https://turf-mgmt-sys.onrender.com/api/auth/register/',
+      );
+
+      // Extract sort_key (part before '@')
+      final sortKey = email.split('@').first;
+      print('${sortKey}');
+
+      final response = await http.post(
+        uri,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'name': name,
+          'email': email,
+          'password': password,
+          'sort_key': sortKey,
+          'phone': mobile,
+        }),
+      );
+
+      print('Register response: ${response.statusCode}');
+      print('Register body: ${response.body}');
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        return true;
+      } else {
+        return false;
+      }
+    } catch (e) {
+      print('Register error: $e');
+      return false;
+    }
+  }
+
+  Future<bool> sendOtp({required String email}) async {
+    final uri = Uri.parse("https://turf-mgmt-sys.onrender.com//send-otp/");
+    final res = await http.post(
+      uri,
+      headers: {"Content-Type": "application/json"},
+      body: jsonEncode({"email": email}),
+    );
+    return res.statusCode == 200;
+  }
+
+  Future<bool> verifyOtp({required String email, required String otp}) async {
+    final uri = Uri.parse("https://turf-mgmt-sys.onrender.com//verify-otp/");
+    final res = await http.post(
+      uri,
+      headers: {"Content-Type": "application/json"},
+      body: jsonEncode({"email": email, "otp": otp}),
+    );
+    return res.statusCode == 200;
+  }
+
+  Future<bool> isTokenValid() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString("access_token");
+
+    if (token == null) return false;
+
+    final payload = jsonDecode(
+      utf8.decode(base64Url.decode(base64Url.normalize(token.split(".")[1]))),
+    );
+
+    final exp = payload["exp"] * 1000;
+    return DateTime.now().millisecondsSinceEpoch < exp;
+  }
+}
+
+final _authService = AuthService();
+
+void showGlassAlert(BuildContext context, String message) {
+  final overlay = OverlayEntry(
+    builder: (context) => Positioned(
+      top: 60, // top position
+      left: MediaQuery.of(context).size.width * 0.1,
+      right: MediaQuery.of(context).size.width * 0.1,
+      child: Material(
+        color: Colors.transparent,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(30),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.green.withOpacity(0.25),
+                borderRadius: BorderRadius.circular(30),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 8,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: Center(
+                child: Text(
+                  message,
+                  style: const TextStyle(
+                    color: Colors.black87,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 14,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
+  Overlay.of(context).insert(overlay);
+  Future.delayed(const Duration(seconds: 2), () {
+    overlay.remove();
+  });
+}
+
+// ---------------------- Glass Button ----------------------
+Widget glassActionButton({
+  required BuildContext context,
+  required String label,
+  required VoidCallback onTap,
+  double height = 55,
+  double radius = 18,
+}) {
+  return GestureDetector(
+    onTap: onTap,
+    child: ClipRRect(
+      borderRadius: BorderRadius.circular(radius),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
+        child: Container(
+          height: height,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: const Color(0xFF4CAF50).withOpacity(0.35),
+            borderRadius: BorderRadius.circular(radius),
+            border: Border.all(color: Colors.white.withOpacity(0.3)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.15),
+                blurRadius: 10,
+                offset: const Offset(0, 5),
+              ),
+            ],
+          ),
+          child: Text(
+            label,
+            style: const TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.bold,
+              color: Colors.white,
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+// ---------------------- LOGIN PAGE ----------------------
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  final _emailCtrl = TextEditingController();
+  final _passCtrl = TextEditingController();
+  bool _loading = false;
+
+  @override
+  void dispose() {
+    _emailCtrl.dispose();
+    _passCtrl.dispose();
+    super.dispose();
+  }
+
+  Widget _dividerLine() => Row(
+    children: const [
+      Expanded(child: Divider(thickness: 1.2, color: Colors.black26)),
+      Padding(
+        padding: EdgeInsets.symmetric(horizontal: 8),
+        child: Text("or", style: TextStyle(color: Colors.black54)),
+      ),
+      Expanded(child: Divider(thickness: 1.2, color: Colors.black26)),
+    ],
+  );
+
+  Widget _frostedField(
+    TextEditingController ctrl,
+    String hint, {
+    bool obscure = false,
+  }) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(12),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          decoration: BoxDecoration(
+            color: const Color(0xFFAED581).withOpacity(0.35),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.green.withOpacity(0.3)),
+          ),
+          child: TextField(
+            controller: ctrl,
+            obscureText: obscure,
+            decoration: InputDecoration(
+              border: InputBorder.none,
+              hintText: hint,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFDDECD6),
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 20),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Text(
+                  "Welcome to Campus Court",
+                  style: TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.black87,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  "Built by IITians for IITians",
+                  style: TextStyle(fontSize: 15, color: Colors.black54),
+                ),
+                const SizedBox(height: 28),
+
+                _frostedField(_emailCtrl, "Email"),
+                const SizedBox(height: 12),
+                _frostedField(_passCtrl, "Password", obscure: true),
+                const SizedBox(height: 18),
+
+                _loading
+                    ? const CircularProgressIndicator(color: Colors.green)
+                    : glassActionButton(
+                        context: context,
+                        label: "Login",
+                        onTap: () async {
+                          setState(() => _loading = true);
+                          final ok = await _authService.login(
+                            email: _emailCtrl.text.trim(),
+                            password: _passCtrl.text,
+                          );
+                          setState(() => _loading = false);
+                          if (ok) {
+                            showGlassAlert(context, "Successfully logged in");
+                            Navigator.pushAndRemoveUntil(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => const HomePage(),
+                              ),
+                              (r) => false,
+                            );
+                          } else {
+                            showGlassAlert(
+                              context,
+                              "Incorrect Email ID or Password",
+                            );
+                          }
+                        },
+                      ),
+                const SizedBox(height: 18),
+
+                _dividerLine(),
+                const SizedBox(height: 18),
+
+                // --- Updated Google Sign-In button ---
+                GestureDetector(
+                  onTap: () {
+                    showDialog(
+                      context: context,
+                      builder: (ctx) => const AlertDialog(
+                        title: Text("Google Sign-In"),
+                        content: Text("Integrate Google Sign-In here."),
+                      ),
+                    );
+                  },
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(40),
+                    child: BackdropFilter(
+                      filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 22,
+                          vertical: 14,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF4CAF50).withOpacity(0.35),
+                          borderRadius: BorderRadius.circular(40),
+                          border: Border.all(
+                            color: Colors.white.withOpacity(0.25),
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.15),
+                              blurRadius: 10,
+                              offset: const Offset(0, 5),
+                            ),
+                          ],
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Image.asset(
+                              'assets/google_logo.png',
+                              height: 24,
+                              width: 24,
+                            ),
+                            const SizedBox(width: 10),
+                            const Text(
+                              "Sign in with Google",
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+
+                const SizedBox(height: 24),
+
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Text(
+                      "Don’t have an account? ",
+                      style: TextStyle(fontSize: 15),
+                    ),
+                    GestureDetector(
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (_) => const SignupPage()),
+                        );
+                      },
+                      child: Text(
+                        "Create account",
+                        style: TextStyle(
+                          fontSize: 15,
+                          color: Colors.green.shade900,
+                          fontWeight: FontWeight.bold,
+                          decoration: TextDecoration.underline,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------- SIGNUP PAGE ----------------------
+class SignupPage extends StatefulWidget {
+  const SignupPage({super.key});
+  @override
+  State<SignupPage> createState() => _SignupPageState();
+}
+
+class _SignupPageState extends State<SignupPage> {
+  final _name = TextEditingController();
+  final _email = TextEditingController();
+  final _mobile = TextEditingController();
+  final _pass = TextEditingController();
+  final _repass = TextEditingController();
+  bool _otpStep = false;
+  final _otpCtrl = TextEditingController();
+
+  bool _loading = false;
+
+  Widget _dividerLine() => Row(
+    children: const [
+      Expanded(child: Divider(thickness: 1.2, color: Colors.black26)),
+      Padding(
+        padding: EdgeInsets.symmetric(horizontal: 8),
+        child: Text("or", style: TextStyle(color: Colors.black54)),
+      ),
+      Expanded(child: Divider(thickness: 1.2, color: Colors.black26)),
+    ],
+  );
+
+  Widget _frostedField(
+    TextEditingController ctrl,
+    String hint, {
+    bool obscure = false,
+    TextInputType? kb,
+  }) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(12),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          decoration: BoxDecoration(
+            color: const Color(0xFFAED581).withOpacity(0.35),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.green.withOpacity(0.3)),
+          ),
+          child: TextField(
+            controller: ctrl,
+            obscureText: obscure,
+            keyboardType: kb,
+            decoration: InputDecoration(
+              border: InputBorder.none,
+              hintText: hint,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _trySignup() async {
+    if (!_otpStep) {
+      setState(() => _loading = true);
+      final sent = await _authService.sendOtp(email: _email.text.trim());
+      setState(() => _loading = false);
+
+      if (sent) {
+        showGlassAlert(context, "OTP Sent to Email");
+        setState(() => _otpStep = true);
+      } else {
+        showGlassAlert(context, "OTP Send Failed");
+      }
+      return;
+    }
+
+    setState(() => _loading = true);
+    final ok = await _authService.register(
+      name: _name.text.trim(),
+      email: _email.text.trim(),
+      mobile: _mobile.text.trim(),
+      password: _pass.text.trim(),
+    );
+    setState(() => _loading = false);
+
+    if (ok) {
+      showGlassAlert(context, "Signup Successful ✅");
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const LoginPage()),
+      );
+    } else {
+      showGlassAlert(context, "Signup Failed");
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFDDECD6),
+      appBar: AppBar(
+        backgroundColor: Colors.green.withOpacity(0.1),
+        elevation: 0,
+        iconTheme: const IconThemeData(color: Colors.black87),
+        title: const Text(
+          "Create Account",
+          style: TextStyle(color: Colors.black87),
+        ),
+      ),
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 20),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                _frostedField(_name, "Full name"),
+                const SizedBox(height: 10),
+                _frostedField(_email, "Email", kb: TextInputType.emailAddress),
+                const SizedBox(height: 10),
+                _frostedField(
+                  _mobile,
+                  "Mobile number",
+                  kb: TextInputType.phone,
+                ),
+                const SizedBox(height: 10),
+                _frostedField(_pass, "Password", obscure: true),
+                const SizedBox(height: 10),
+                _frostedField(_repass, "Re-enter password", obscure: true),
+                const SizedBox(height: 18),
+                if (_loading)
+                  const CircularProgressIndicator(color: Colors.green)
+                else if (!_otpStep)
+                  glassActionButton(
+                    context: context,
+                    label: "Submit",
+                    onTap: _trySignup,
+                  )
+                else if (_otpStep) ...[
+                  _frostedField(
+                    _otpCtrl,
+                    "Enter OTP",
+                    kb: TextInputType.number,
+                  ),
+                  const SizedBox(height: 12),
+
+                  GestureDetector(
+                    onTap: () async {
+                      final ok = await _authService.verifyOtp(
+                        email: _email.text.trim(),
+                        otp: _otpCtrl.text.trim(),
+                      );
+                      if (ok) {
+                        showGlassAlert(context, "OTP Verified ✅");
+                        setState(() {});
+                      } else {
+                        showGlassAlert(context, "Invalid OTP ❌");
+                      }
+                    },
+                    child: Text(
+                      "Verify OTP",
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.green.shade900,
+                        decoration: TextDecoration.underline,
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 18),
+
+                  Opacity(
+                    opacity: _otpCtrl.text.trim().length == 6 ? 1 : 0.4,
+                    child: IgnorePointer(
+                      ignoring: _otpCtrl.text.trim().length != 6,
+                      child: glassActionButton(
+                        context: context,
+                        label: "Signup",
+                        onTap: _trySignup,
+                      ),
+                    ),
+                  ),
+                ],
+
+                if (!_otpStep) ...[
+                  const SizedBox(height: 18),
+                  _dividerLine(),
+                  const SizedBox(height: 18),
+                  GestureDetector(
+                    onTap: () {
+                      showDialog(
+                        context: context,
+                        builder: (ctx) => const AlertDialog(
+                          title: Text("Google Sign-In"),
+                          content: Text("Integrate Google Sign-In here."),
+                        ),
+                      );
+                    },
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(40),
+                      child: BackdropFilter(
+                        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 22,
+                            vertical: 14,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF4CAF50).withOpacity(0.35),
+                            borderRadius: BorderRadius.circular(40),
+                            border: Border.all(
+                              color: Colors.white.withOpacity(0.25),
+                            ),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Image.asset(
+                                'assets/google_logo.png',
+                                height: 24,
+                                width: 24,
+                              ),
+                              const SizedBox(width: 10),
+                              const Text(
+                                "Sign up with Google",
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 16,
+                                  color: Colors.white,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+Future<void> requestLocationPermission(BuildContext context) async {
+  bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+  if (!serviceEnabled) {
+    showGlassAlert(
+      context,
+      "Please enable location services for better experience",
+    );
+    return;
+  }
+
+  LocationPermission permission = await Geolocator.checkPermission();
+  if (permission == LocationPermission.denied) {
+    permission = await Geolocator.requestPermission();
+  }
+
+  if (permission == LocationPermission.deniedForever ||
+      permission == LocationPermission.denied) {
+    showGlassAlert(
+      context,
+      "Location access is needed for campus-based features",
+    );
+    return;
+  }
+
+  // ✅ Optional: get current location (just to verify)
+  final pos = await Geolocator.getCurrentPosition(
+    desiredAccuracy: LocationAccuracy.high,
+  );
+  print("User Location: ${pos.latitude}, ${pos.longitude}");
+}
+
+Future<bool> isInsideCampus() async {
+  try {
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+
+    if (permission == LocationPermission.deniedForever) {
+      return false; // can't get location
+    }
+
+    final pos = await Geolocator.getCurrentPosition(
+      desiredAccuracy: LocationAccuracy.high,
+    );
+
+    const double campusLat = 30.9686;
+    const double campusLon = 76.4733;
+    const double allowedRadiusMeters = 2000;
+
+    double distance = Geolocator.distanceBetween(
+      campusLat,
+      campusLon,
+      pos.latitude,
+      pos.longitude,
+    );
+
+    print("Current distance from campus: $distance meters");
+    return distance <= allowedRadiusMeters;
+  } catch (e) {
+    print("Error checking location: $e");
+    return false;
+  }
+}
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -155,6 +917,11 @@ class _HomePageState extends State<HomePage> {
     _selectedIndex = navController.selectedIndex;
     navController.addListener(() {
       setState(() => _selectedIndex = navController.selectedIndex);
+    });
+
+    // ✅ Ask for location permission once HomePage is reached
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      requestLocationPermission(context);
     });
   }
 
@@ -219,14 +986,37 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
                 const SizedBox(height: 16),
-                const Text(
-                  "Upcoming Events",
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.black87,
-                  ),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      "Upcoming Events",
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black87,
+                      ),
+                    ),
+
+                    // ✅ Subtle Add Event Icon Button
+                    GestureDetector(
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => const AddEventPage(),
+                          ),
+                        );
+                      },
+                      child: Icon(
+                        Icons.add_circle_outline,
+                        size: 26,
+                        color: Colors.green.shade600,
+                      ),
+                    ),
+                  ],
                 ),
+
                 const SizedBox(height: 12),
 
                 // ✅ Swipable Event Cards
@@ -340,8 +1130,508 @@ class _HomePageState extends State<HomePage> {
   }
 }
 
-// ---- Frosted Glass Widgets ----
+class EventDetailsPage extends StatelessWidget {
+  final String title;
+  final String location;
+  final String? image;
 
+  const EventDetailsPage({
+    super.key,
+    required this.title,
+    required this.location,
+    this.image,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF1FAF1),
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        iconTheme: const IconThemeData(color: Colors.black87),
+        title: Text(
+          "Event Details",
+          style: TextStyle(color: Colors.black87, fontWeight: FontWeight.bold),
+        ),
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          children: [
+            // Top Image
+            ClipRRect(
+              borderRadius: BorderRadius.circular(18),
+              child: Image.asset(
+                "assets/$image",
+                height: 220,
+                width: double.infinity,
+                fit: BoxFit.cover,
+              ),
+            ),
+
+            const SizedBox(height: 20),
+
+            _infoTile("Tournament Title", title, Icons.emoji_events_outlined),
+            _infoTile("Location", location, Icons.place_outlined),
+            _infoTile("Sport", "Football", Icons.sports_soccer),
+            _infoTile("Date & Time", "12 Feb 2025 • 4:00 PM", Icons.schedule),
+            _infoTile(
+              "Organizer Contact",
+              "+91 9876543210",
+              Icons.call_outlined,
+            ),
+
+            _contentTile(
+              "Tournament Description",
+              "Join the most competitive sports event at IIT RPR. Register soon before slots are full.",
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _infoTile(String label, String value, IconData icon) {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 8),
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: Colors.green.shade200.withOpacity(0.35),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.green.shade400.withOpacity(0.5)),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: Colors.green.shade700),
+          const SizedBox(width: 15),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    color: Colors.black54,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  value,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    color: Colors.black87,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _contentTile(String title, String content) {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 12),
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: Colors.green.shade200.withOpacity(0.35),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.green.shade400.withOpacity(0.5)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: Colors.black87,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            content,
+            style: const TextStyle(
+              fontSize: 14,
+              color: Colors.black87,
+              height: 1.4,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class AddEventPage extends StatefulWidget {
+  const AddEventPage({super.key});
+
+  @override
+  State<AddEventPage> createState() => _AddEventPageState();
+}
+
+class _AddEventPageState extends State<AddEventPage> {
+  final TextEditingController _titleController = TextEditingController();
+  final TextEditingController _sportController = TextEditingController();
+  final TextEditingController _dateTimeController = TextEditingController();
+  final TextEditingController _contactController = TextEditingController();
+  final TextEditingController _detailsController = TextEditingController();
+  final TextEditingController _locationController = TextEditingController();
+  String? _selectedPosterId;
+  final Map<String, List<String>> sportPosters = {
+    "football": [
+      "football_1.png",
+      "football_2.png",
+      "football_3.png",
+      "football_4.png",
+      "football_5.png",
+    ],
+    "basketball": [
+      "basketball_1.png",
+      "basketball_2.png",
+      "basketball_3.png",
+      "basketball_4.png",
+      "basketball_5.png",
+    ],
+    "cricket": [
+      "cricket_1.png",
+      "cricket_2.png",
+      "cricket_3.png",
+      "cricket_4.png",
+      "cricket_5.png",
+    ],
+    "badminton": [
+      "badminton_1.png",
+      "badminton_2.png",
+      "badminton_3.png",
+      "badminton_4.png",
+      "badminton_5.png",
+    ],
+    // Add remaining sports the same way
+  };
+
+  Widget glassButton(
+    String text, {
+    required Color color,
+    required VoidCallback onTap,
+    double blur = 14,
+    double opacity = 0.25,
+    double height = 52,
+    double radius = 18,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(radius),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
+          child: Container(
+            height: height,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: color.withOpacity(opacity),
+              borderRadius: BorderRadius.circular(radius),
+              border: Border.all(color: Colors.white.withOpacity(0.25)),
+              boxShadow: [
+                BoxShadow(
+                  color: color.withOpacity(0.2),
+                  blurRadius: 8,
+                  offset: const Offset(2, 3),
+                ),
+              ],
+            ),
+            child: Text(
+              text,
+              style: TextStyle(
+                color: Colors.green.shade900.withOpacity(0.9),
+                fontSize: 15,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPosterSelector(String sport) {
+    final posters = sportPosters[sport]!;
+    final PageController pageController = PageController(
+      viewportFraction: 0.98,
+    );
+
+    return Container(
+      height: 380,
+      decoration: const BoxDecoration(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(25)),
+        color: Colors.transparent,
+      ),
+      child: ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(25)),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+          child: Container(
+            padding: const EdgeInsets.only(top: 20, bottom: 20),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.15),
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(25),
+              ),
+              border: Border.all(color: Colors.white.withOpacity(0.25)),
+            ),
+            child: Column(
+              children: [
+                // ✅ Circular Swipe Indicator
+                SmoothPageIndicator(
+                  controller: pageController,
+                  count: posters.length,
+                  effect: WormEffect(
+                    dotHeight: 9,
+                    dotWidth: 9,
+                    type: WormType.thinUnderground,
+                    spacing: 8,
+                    activeDotColor: Colors.white,
+                    dotColor: Colors.white.withOpacity(0.4),
+                  ),
+                ),
+
+                const SizedBox(height: 20),
+
+                // ✅ Poster Swiper (Wider + Shorter + Full visible)
+                Expanded(
+                  child: PageView.builder(
+                    controller: pageController,
+                    scrollDirection: Axis.horizontal,
+                    itemCount: posters.length,
+                    itemBuilder: (context, index) {
+                      final posterId = posters[index];
+
+                      return GestureDetector(
+                        onTap: () {
+                          setState(() => _selectedPosterId = posterId);
+                          Navigator.pop(context);
+                        },
+                        child: Container(
+                          margin: const EdgeInsets.symmetric(horizontal: 10),
+                          width: double.infinity,
+                          height: 180, // << Reduced Height Here ✅
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(20),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.25),
+                                blurRadius: 12,
+                                offset: const Offset(0, 6),
+                              ),
+                            ],
+                          ),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(20),
+                            child: Image.asset(
+                              "assets/event_posters/$posterId",
+                              fit: BoxFit.contain, // << Full Image Visible ✅
+                              alignment: Alignment.center,
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFDDEEE1), // ✅ EXACT SAME BACKGROUND
+      appBar: AppBar(
+        backgroundColor: Colors.green.withOpacity(0.05),
+        elevation: 0,
+        title: const Text(
+          "Post Event",
+          style: TextStyle(color: Colors.black87, fontWeight: FontWeight.w600),
+        ),
+        iconTheme: const IconThemeData(color: Colors.black87),
+      ),
+
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // -------- EVENT DETAILS INPUTS (Same UI as AddTeamPage) --------
+              TextField(
+                controller: _sportController,
+                style: const TextStyle(color: Colors.black87),
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: const Color(0xFFBFE3C0).withOpacity(0.3),
+                  labelText: "Sport Name",
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                onChanged: (_) => setState(() => _selectedPosterId = null),
+              ),
+              const SizedBox(height: 12),
+
+              // ✅ POSTER SELECTION BOX
+              GestureDetector(
+                onTap: () {
+                  final sport = _sportController.text.trim().toLowerCase();
+                  if (!sportPosters.containsKey(sport)) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text("Please enter a valid sport name first."),
+                      ),
+                    );
+                    return;
+                  }
+                  showModalBottomSheet(
+                    context: context,
+                    backgroundColor: Colors.transparent,
+                    barrierColor: Colors.black.withOpacity(0.35),
+                    shape: const RoundedRectangleBorder(
+                      borderRadius: BorderRadius.vertical(
+                        top: Radius.circular(20),
+                      ),
+                    ),
+                    builder: (_) => _buildPosterSelector(sport.toLowerCase()),
+                  );
+                },
+                child: Container(
+                  height: 240,
+                  width: double.infinity,
+                  decoration: BoxDecoration(
+                    color: Colors.green.withOpacity(0.08),
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: Colors.green.shade200),
+                  ),
+                  child: _selectedPosterId == null
+                      ? const Center(
+                          child: Text(
+                            "Tap to Select Event Poster",
+                            style: TextStyle(
+                              color: Colors.black54,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        )
+                      : ClipRRect(
+                          borderRadius: BorderRadius.circular(18),
+                          child: Image.asset(
+                            "assets/event_posters/$_selectedPosterId",
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                ),
+              ),
+              const SizedBox(height: 14),
+
+              TextField(
+                controller: _titleController,
+                style: const TextStyle(color: Colors.black87),
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: const Color(0xFFBFE3C0).withOpacity(0.3),
+                  labelText: "Event Title",
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+
+              // 🔹 Event Location
+              TextField(
+                controller: _locationController,
+                style: const TextStyle(color: Colors.black87),
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: const Color(0xFFBFE3C0).withOpacity(0.3),
+                  labelText: "Event Location",
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+
+              TextField(
+                controller: _dateTimeController,
+                style: const TextStyle(color: Colors.black87),
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: const Color(0xFFBFE3C0).withOpacity(0.3),
+                  labelText: "Date & Time (e.g. 12 Feb 2025 • 4:00 PM)",
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+
+              TextField(
+                controller: _contactController,
+                style: const TextStyle(color: Colors.black87),
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: const Color(0xFFBFE3C0).withOpacity(0.3),
+                  labelText: "Organizer Contact",
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+
+              TextField(
+                controller: _detailsController,
+                maxLines: 4,
+                style: const TextStyle(color: Colors.black87),
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: const Color(0xFFBFE3C0).withOpacity(0.3),
+                  labelText: "Event Description",
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 22),
+
+              // -------- POST BUTTON (Same as Create Team Button) --------
+              glassButton(
+                "Post Event",
+                color: const Color(0xFF2E7D32), // ✅ same dark green
+                opacity: 0.3,
+                onTap: () {
+                  Navigator.pop(context);
+                },
+              ),
+              const SizedBox(height: 40),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---- Frosted Glass Widgets ----
 class FrostedGlassCard extends StatefulWidget {
   final String title;
   final String location;
@@ -363,114 +1653,121 @@ class _FrostedGlassCardState extends State<FrostedGlassCard> {
 
   @override
   Widget build(BuildContext context) {
-    return MouseRegion(
-      onEnter: (_) => setState(() => _isHovered = true),
-      onExit: (_) => setState(() => _isHovered = false),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 300),
-        transform: Matrix4.identity()..scale(_isHovered ? 1.02 : 1.0),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(20),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-            child: Container(
-              decoration: BoxDecoration(
-                color: Colors.green.withOpacity(0.08),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: Colors.white.withOpacity(0.3)),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.08),
-                    blurRadius: 8,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
-              ),
-              child: Stack(
-                children: [
-                  // Full image background
-                  Positioned.fill(
-                    child: widget.image != null
-                        ? Image.asset(
-                            'assets/${widget.image!}',
-                            fit: BoxFit.cover,
-                          )
-                        : Container(color: Colors.green.withOpacity(0.1)),
-                  ),
+    return GestureDetector(
+      onTap: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => EventDetailsPage(
+              title: widget.title,
+              location: widget.location,
+              image: widget.image,
+            ),
+          ),
+        );
+      },
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _isHovered = true),
+        onExit: (_) => setState(() => _isHovered = false),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 300),
+          transform: Matrix4.identity()..scale(_isHovered ? 1.02 : 1.0),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(20),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.green.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: Colors.white.withOpacity(0.3)),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.08),
+                      blurRadius: 8,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: Stack(
+                  children: [
+                    // Full image background
+                    Positioned.fill(
+                      child: widget.image != null
+                          ? Image.asset(
+                              'assets/${widget.image!}',
+                              fit: BoxFit.cover,
+                            )
+                          : Container(color: Colors.green.withOpacity(0.1)),
+                    ),
 
-                  // Optional gradient overlay for better contrast
-                  Positioned.fill(
-                    child: Container(
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: Alignment.topCenter,
-                          end: Alignment.bottomCenter,
-                          colors: [
-                            Colors.transparent,
-                            Colors.black.withOpacity(0.25),
-                            Colors.black.withOpacity(0.35),
-                          ],
+                    // Gradient overlay for readability
+                    Positioned.fill(
+                      child: Container(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              Colors.transparent,
+                              Colors.black.withOpacity(0.25),
+                              Colors.black.withOpacity(0.35),
+                            ],
+                          ),
                         ),
                       ),
                     ),
-                  ),
 
-                  // Floating glassy pill with event info
-                  Positioned(
-                    bottom: 16,
-                    left: 16,
-                    right: 16,
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(50),
-                      child: BackdropFilter(
-                        filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 10,
-                          ),
-                          decoration: BoxDecoration(
-                            color: const Color(
-                              0xFFE8F5E9,
-                            ).withOpacity(0.35), // minty glass tint
-                            borderRadius: BorderRadius.circular(50),
-                            border: Border.all(
-                              color: Colors.white.withOpacity(0.3),
+                    // Glass info pill
+                    Positioned(
+                      bottom: 16,
+                      left: 16,
+                      right: 16,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(50),
+                        child: BackdropFilter(
+                          filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 10,
                             ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withOpacity(0.15),
-                                blurRadius: 8,
-                                offset: const Offset(0, 3),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFE8F5E9).withOpacity(0.35),
+                              borderRadius: BorderRadius.circular(50),
+                              border: Border.all(
+                                color: Colors.white.withOpacity(0.3),
                               ),
-                            ],
-                          ),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                widget.title,
-                                style: const TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w600,
-                                  color: Colors.white,
+                            ),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  widget.title, // ✅ always shows title
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w600,
+                                    color: Colors.white,
+                                  ),
                                 ),
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                widget.location,
-                                style: const TextStyle(
-                                  fontSize: 13,
-                                  color: Colors.white70,
+                                const SizedBox(height: 4),
+                                Text(
+                                  widget.location,
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(
+                                    fontSize: 13,
+                                    color: Colors.white70,
+                                  ),
                                 ),
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
                         ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
@@ -501,7 +1798,8 @@ class FrostedIconCard extends StatelessWidget {
           Navigator.push(
             context,
             MaterialPageRoute(
-              builder: (context) => TeamListPage(sportName: name),
+              builder: (context) =>
+                  TeamListPage(sportName: name, sportId: 'football123'),
             ),
           );
           return;
@@ -929,13 +2227,15 @@ class BasketballGroundSelectionPage extends StatelessWidget {
   }
 }
 
+int _globalSelectedDateIndex = 0; // persists last selected date globally
+
 class SlotBookingPage extends StatefulWidget {
   final String sportName;
   final String groundName;
-  final String slotDate;
+  String slotDate;
   final List<String>? customSlots;
 
-  const SlotBookingPage({
+  SlotBookingPage({
     super.key,
     required this.sportName,
     required this.groundName,
@@ -1061,11 +2361,14 @@ final Map<String, Map<String, List<String>>> groundSlotRules = {
 class _SlotBookingPageState extends State<SlotBookingPage> {
   late List<String> _slots;
   final Set<String> _selectedSlots = {};
+  int _selectedDateIndex = 0;
+  final ScrollController _dateScrollController = ScrollController();
 
   @override
   void initState() {
     super.initState();
     _ensureMinPlayers();
+    _selectedDateIndex = _globalSelectedDateIndex;
     _slots =
         widget.customSlots ??
         groundSlotRules[widget.sportName]?[widget.groundName] ??
@@ -1099,6 +2402,12 @@ class _SlotBookingPageState extends State<SlotBookingPage> {
           '9:00 PM - 9:30 PM',
           '9:30 PM - 10:00 PM',
         ];
+  }
+
+  @override
+  void dispose() {
+    _dateScrollController.dispose(); // clean up controller memory
+    super.dispose();
   }
 
   // ---------- participants controllers ----------
@@ -1212,7 +2521,7 @@ class _SlotBookingPageState extends State<SlotBookingPage> {
                       horizontal: 16,
                     ),
                     decoration: BoxDecoration(
-                      color: Colors.green.withOpacity(0.1),
+                      color: const Color(0xFFCDE7C4),
                       borderRadius: BorderRadius.circular(18),
                       border: Border.all(color: Colors.white.withOpacity(0.3)),
                       boxShadow: [
@@ -1249,7 +2558,135 @@ class _SlotBookingPageState extends State<SlotBookingPage> {
               ),
             ),
 
-            const SizedBox(height: 12),
+            // --- 7-Day Date Selector (refined UI + auto-scroll + color matched) ---
+            SizedBox(
+              height: 82,
+              child: ListView.builder(
+                controller: _dateScrollController, // ✅ new scroll controller
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                itemCount: 7,
+                itemBuilder: (context, index) {
+                  final date = DateTime.now().add(Duration(days: index));
+
+                  final formatted =
+                      "${date.day.toString().padLeft(2, '0')}/${date.month.toString().padLeft(2, '0')}/${date.year}";
+                  final weekday = [
+                    "Sun",
+                    "Mon",
+                    "Tue",
+                    "Wed",
+                    "Thu",
+                    "Fri",
+                    "Sat",
+                  ][date.weekday % 7];
+
+                  final isSelected = _selectedDateIndex == index;
+
+                  return GestureDetector(
+                    onTap: () {
+                      setState(() {
+                        _selectedDateIndex = index;
+                        _globalSelectedDateIndex = index;
+
+                        // ✅ Update the current selected date string
+                        final newDate = DateTime.now().add(
+                          Duration(days: index),
+                        );
+                        final formattedDate =
+                            "${newDate.year}-${newDate.month.toString().padLeft(2, '0')}-${newDate.day.toString().padLeft(2, '0')}";
+
+                        // ✅ Update the widget's current slot date (no page reload)
+                        widget.slotDate = formattedDate;
+
+                        // ✅ Optionally clear previous slot selections (if needed)
+                        _selectedSlots.clear();
+
+                        // ✅ (If you plan to dynamically load slots from backend)
+                        // _refreshSlotsForDate(formattedDate);
+                      });
+
+                      // ✅ Smooth scroll keeps selected date in view
+                      _dateScrollController.animateTo(
+                        (index - 1).clamp(0, 6) * 105.0,
+                        duration: const Duration(milliseconds: 250),
+                        curve: Curves.easeOut,
+                      );
+                    },
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      width: 95,
+                      margin: const EdgeInsets.only(right: 14),
+                      decoration: BoxDecoration(
+                        color: isSelected
+                            ? Colors.green.shade800.withOpacity(0.25)
+                            : Colors.green.withOpacity(0.08),
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(
+                          color: Colors.white.withOpacity(0.3),
+                          width: 1.0,
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.05),
+                            blurRadius: 6,
+                            offset: const Offset(0, 3),
+                          ),
+                        ],
+                      ),
+                      child: Container(
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: isSelected
+                              ? Colors.green.shade800.withOpacity(
+                                  0.45,
+                                ) // same as selected slot
+                              : Colors.green.withOpacity(0.08),
+                          borderRadius: BorderRadius.circular(18),
+                          border: Border.all(
+                            color: Colors.white.withOpacity(0.3),
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.05),
+                              blurRadius: 6,
+                              offset: const Offset(0, 3),
+                            ),
+                          ],
+                        ),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Text(
+                              weekday,
+                              style: TextStyle(
+                                fontWeight: FontWeight.w600,
+                                fontSize: 13,
+                                color: isSelected
+                                    ? Colors.white
+                                    : Colors.black87,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              formatted,
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                                color: isSelected
+                                    ? Colors.white
+                                    : Colors.black87,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 16),
 
             // --- Slot grid (Glass effect) ---
             Expanded(
@@ -1319,28 +2756,51 @@ class _SlotBookingPageState extends State<SlotBookingPage> {
               child: GestureDetector(
                 onTap: () {
                   if (_selectedSlots.isEmpty) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text("Please select at least one slot"),
-                      ),
+                    showGlassAlert(context, "Please select at least one slot");
+                    return;
+                  }
+
+                  // ✅ Sort slots in chronological order for checking continuity
+                  final sortedSlots =
+                      _slots.where((s) => _selectedSlots.contains(s)).toList()
+                        ..sort(
+                          (a, b) =>
+                              _slots.indexOf(a).compareTo(_slots.indexOf(b)),
+                        );
+
+                  bool continuous = true;
+                  for (int i = 1; i < sortedSlots.length; i++) {
+                    int prevIndex = _slots.indexOf(sortedSlots[i - 1]);
+                    int currIndex = _slots.indexOf(sortedSlots[i]);
+                    if (currIndex - prevIndex != 1) {
+                      continuous = false;
+                      break;
+                    }
+                  }
+
+                  if (!continuous) {
+                    showGlassAlert(
+                      context,
+                      "Please select continuous slots only",
                     );
                     return;
                   }
 
+                  // ✅ All good → Navigate to next screen
                   Navigator.push(
                     context,
                     MaterialPageRoute(
                       builder: (context) => FinalSlotBookingPage(
                         sport: widget.sportName,
                         ground: widget.groundName,
-                        slotDate:
-                            widget.slotDate, // ensure widget.slotDate exists
+                        slotDate: widget.slotDate,
                         selectedSlots: _selectedSlots.toList(),
                         team: _collectTeam(),
                       ),
                     ),
                   );
                 },
+
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(18),
                   child: BackdropFilter(
@@ -1350,7 +2810,7 @@ class _SlotBookingPageState extends State<SlotBookingPage> {
                       height: 55,
                       alignment: Alignment.center,
                       decoration: BoxDecoration(
-                        color: Colors.green.withOpacity(0.3),
+                        color: Color(0xFF4CAF50).withOpacity(0.45),
                         borderRadius: BorderRadius.circular(18),
                         border: Border.all(
                           color: Colors.white.withOpacity(0.3),
@@ -1381,6 +2841,53 @@ class _SlotBookingPageState extends State<SlotBookingPage> {
           ],
         ),
       ),
+      bottomNavigationBar: const PersistentNavBar(),
+    );
+  }
+}
+
+class RootShell extends StatefulWidget {
+  const RootShell({super.key});
+
+  @override
+  State<RootShell> createState() => _RootShellState();
+}
+
+class _RootShellState extends State<RootShell> {
+  final PageController _pageController = PageController();
+
+  final List<Widget> pages = [
+    HomePage(),
+    NotificationPage(),
+    TeamsPage(),
+    BookingHistoryPage(),
+    ProfilePage(),
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    navController.addListener(() {
+      _pageController.animateToPage(
+        navController.selectedIndex,
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFDDECD6),
+
+      body: PageView(
+        controller: _pageController,
+        physics: const BouncingScrollPhysics(),
+        onPageChanged: (i) => navController.setIndex(i),
+        children: pages,
+      ),
+
       bottomNavigationBar: const PersistentNavBar(),
     );
   }
@@ -1441,7 +2948,7 @@ class _PersistentNavBarState extends State<PersistentNavBar> {
 
                     // Navigate based on the selected icon
                     switch (index) {
-                      case 0: // Home
+                      case 0:
                         Navigator.of(context).pushAndRemoveUntil(
                           MaterialPageRoute(
                             builder: (context) => const HomePage(),
@@ -1449,17 +2956,15 @@ class _PersistentNavBarState extends State<PersistentNavBar> {
                           (route) => false,
                         );
                         break;
-
-                      case 1: // Notifications
+                      case 1:
                         Navigator.of(context).pushAndRemoveUntil(
                           MaterialPageRoute(
-                            builder: (context) => const NotificationPage(),
+                            builder: (context) => NotificationPage(),
                           ),
                           (route) => false,
                         );
                         break;
-
-                      case 2: // Teams List
+                      case 2:
                         Navigator.of(context).pushAndRemoveUntil(
                           MaterialPageRoute(
                             builder: (context) => const TeamsPage(),
@@ -1467,8 +2972,7 @@ class _PersistentNavBarState extends State<PersistentNavBar> {
                           (route) => false,
                         );
                         break;
-
-                      case 3: // Booking History
+                      case 3:
                         Navigator.of(context).pushAndRemoveUntil(
                           MaterialPageRoute(
                             builder: (context) => const BookingHistoryPage(),
@@ -1476,8 +2980,7 @@ class _PersistentNavBarState extends State<PersistentNavBar> {
                           (route) => false,
                         );
                         break;
-
-                      case 4: // Profile
+                      case 4:
                         Navigator.of(context).pushAndRemoveUntil(
                           MaterialPageRoute(
                             builder: (context) => const ProfilePage(),
@@ -1485,8 +2988,6 @@ class _PersistentNavBarState extends State<PersistentNavBar> {
                           (route) => false,
                         );
                         break;
-
-                      // You can add more cases for other icons if needed
                       default:
                         break;
                     }
@@ -1604,25 +3105,27 @@ class GroundSelectionPageCommon extends StatelessWidget {
 }
 
 class NotificationPage extends StatelessWidget {
-  final List<Map<String, String>> notifications = const [
-    {
-      "title": "Booking Confirmed",
-      "message": "Your slot for 8:00 AM - 8:30 AM is confirmed.",
-      "time": "5 min ago",
-    },
-    {
-      "title": "Slot Cancelled",
-      "message": "Your 9:00 AM - 9:30 AM slot was cancelled by admin.",
-      "time": "1 hr ago",
-    },
-    {
-      "title": "New Announcement",
-      "message": "Football ground will undergo maintenance tomorrow.",
-      "time": "2 hrs ago",
-    },
-  ];
+  final List<Map<String, String>> notifications = globalNotifications.isNotEmpty
+      ? globalNotifications
+      : const [
+          {
+            "title": "Booking Confirmed",
+            "message": "Your slot for 8:00 AM - 8:30 AM is confirmed.",
+            "time": "5 min ago",
+          },
+          {
+            "title": "Slot Cancelled",
+            "message": "Your 9:00 AM - 9:30 AM slot was cancelled by admin.",
+            "time": "1 hr ago",
+          },
+          {
+            "title": "New Announcement",
+            "message": "Football ground will undergo maintenance tomorrow.",
+            "time": "2 hrs ago",
+          },
+        ];
 
-  const NotificationPage({super.key});
+  NotificationPage({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -1806,11 +3309,16 @@ class TeamsPage extends StatelessWidget {
                     final name = sport.keys.first;
                     final image = sport.values.first;
                     return GestureDetector(
-                      onTap: () {
+                      onTap: () async {
+                        // 🔹 Backend Placeholder: Send sport ID to backend
+                        final sportId = name.hashCode.toString();
+                        // TODO: Replace with backend call using sportId
+
                         Navigator.push(
                           context,
                           MaterialPageRoute(
-                            builder: (_) => TeamListPage(sportName: name),
+                            builder: (_) =>
+                                TeamListPage(sportName: name, sportId: sportId),
                           ),
                         );
                       },
@@ -1835,30 +3343,42 @@ class TeamsPage extends StatelessWidget {
 // ================== 🆕 TEAM LIST PAGE ==================
 class TeamListPage extends StatelessWidget {
   final String sportName;
+  final String sportId;
 
-  const TeamListPage({super.key, required this.sportName});
+  const TeamListPage({
+    super.key,
+    required this.sportName,
+    required this.sportId,
+  });
 
-  // Custom teams list by sport
-  List<String> _getTeams() {
+  List<Map<String, String>> _getTeams() {
+    // Mock backend data with teamId
     switch (sportName) {
       case 'Football':
-        return ['Rovers FC', 'Campus United', 'Mechanical XI', 'Civil Stars'];
+        return [
+          {'id': 't01', 'name': 'Rovers FC'},
+          {'id': 't02', 'name': 'Campus United'},
+          {'id': 't03', 'name': 'Mechanical XI'},
+          {'id': 't04', 'name': 'Civil Stars'},
+        ];
       case 'Cricket':
-        return ['RPR Blazers', 'ECE Warriors', 'Hostel Kings', 'Phoenix XI'];
+        return [
+          {'id': 't11', 'name': 'RPR Blazers'},
+          {'id': 't12', 'name': 'ECE Warriors'},
+          {'id': 't13', 'name': 'Hostel Kings'},
+          {'id': 't14', 'name': 'Phoenix XI'},
+        ];
       case 'Basketball':
-        return ['Dunk Masters', 'Tech Titans', 'Campus Bulls'];
-      case 'Badminton':
-        return ['Shuttle Squad', 'Net Ninjas', 'Ace Breakers'];
-      case 'Tennis':
-        return ['Baseline Breakers', 'Racquet Rebels'];
-      case 'Volleyball':
-        return ['Spike Force', 'Campus Smashers'];
-      case 'Hockey':
-        return ['RPR Hawks', 'Steel Blades'];
-      case 'Table Tennis':
-        return ['Spin Masters', 'Topspin Titans', 'Net Ninjas'];
+        return [
+          {'id': 't21', 'name': 'Dunk Masters'},
+          {'id': 't22', 'name': 'Tech Titans'},
+          {'id': 't23', 'name': 'Campus Bulls'},
+        ];
       default:
-        return ['Team A', 'Team B'];
+        return [
+          {'id': 'x1', 'name': 'Team A'},
+          {'id': 'x2', 'name': 'Team B'},
+        ];
     }
   }
 
@@ -1870,90 +3390,107 @@ class TeamListPage extends StatelessWidget {
     return Scaffold(
       backgroundColor: const Color(0xFFE8F5E9),
       extendBody: true,
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // 🔹 Top bar with back
-              Row(
-                children: [
-                  IconButton(
-                    icon: const Icon(
-                      Icons.arrow_back_ios_new_rounded,
-                      color: Colors.black87,
-                    ),
-                    onPressed: () => Navigator.pop(context),
-                  ),
-                  const SizedBox(width: 4),
-                  Text(
-                    "$sportName Teams List",
-                    style: const TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.black87,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 20),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFFE8F5E9),
+        elevation: 0,
+        title: Text(
+          "$sportName Teams",
+          style: const TextStyle(
+            fontWeight: FontWeight.w600,
+            color: Colors.black87,
+          ),
+        ),
+        leading: IconButton(
+          icon: const Icon(
+            Icons.arrow_back_ios_new_rounded,
+            color: Colors.black87,
+          ),
+          onPressed: () => Navigator.pop(context),
+        ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.add_circle_outline, color: Colors.green),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => AddTeamPage(sportName: sportName),
+                ),
+              );
+            },
+          ),
+        ],
+      ),
+      body: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: ListView.builder(
+          itemCount: teams.length,
+          itemBuilder: (context, index) {
+            final team = teams[index];
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 16.0),
+              child: GestureDetector(
+                onTap: () async {
+                  final teamId = team['id']!;
+                  // 🔹 Backend Placeholder: Send teamId to backend, get data
+                  // TODO: Replace mock with backend call
 
-              // 🔹 Team list
-              Expanded(
-                child: ListView.builder(
-                  itemCount: teams.length,
-                  itemBuilder: (context, index) {
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: 16.0),
-                      child: ClipRRect(
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => TeamDetailsPage(
+                        teamId: teamId,
+                        teamName: team['name']!,
+                        sportName: sportName,
+                      ),
+                    ),
+                  );
+                },
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(18),
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
+                    child: Container(
+                      height: 80,
+                      decoration: BoxDecoration(
+                        color: Colors.green.withOpacity(0.08),
                         borderRadius: BorderRadius.circular(18),
-                        child: BackdropFilter(
-                          filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
-                          child: Container(
-                            height: 80,
-                            decoration: BoxDecoration(
-                              color: Colors.green.withOpacity(0.08),
-                              borderRadius: BorderRadius.circular(18),
-                              border: Border.all(
-                                color: Colors.white.withOpacity(0.3),
-                              ),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withOpacity(0.08),
-                                  blurRadius: 8,
-                                  offset: const Offset(0, 4),
-                                ),
-                              ],
-                            ),
-                            child: Row(
-                              children: [
-                                const SizedBox(width: 16),
-                                const Icon(
-                                  Icons.group_rounded,
-                                  color: Colors.green,
-                                  size: 28,
-                                ),
-                                const SizedBox(width: 16),
-                                Text(
-                                  teams[index],
-                                  style: const TextStyle(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.w600,
-                                    color: Colors.black87,
-                                  ),
-                                ),
-                              ],
+                        border: Border.all(
+                          color: Colors.white.withOpacity(0.3),
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.08),
+                            blurRadius: 8,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      child: Row(
+                        children: [
+                          const SizedBox(width: 16),
+                          const Icon(
+                            Icons.group_rounded,
+                            color: Colors.green,
+                            size: 28,
+                          ),
+                          const SizedBox(width: 16),
+                          Text(
+                            team['name']!,
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.black87,
                             ),
                           ),
-                        ),
+                        ],
                       ),
-                    );
-                  },
+                    ),
+                  ),
                 ),
               ),
-            ],
-          ),
+            );
+          },
         ),
       ),
       bottomNavigationBar: const PersistentNavBar(),
@@ -1961,6 +3498,687 @@ class TeamListPage extends StatelessWidget {
   }
 }
 
+class TeamDetailsPage extends StatelessWidget {
+  final String teamId;
+  final String teamName;
+  final String sportName; // ✅ Added sport name
+
+  const TeamDetailsPage({
+    super.key,
+    required this.teamId,
+    required this.teamName,
+    required this.sportName,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final Map<String, dynamic> teamInfo = {
+      "createdOn": "12 Jan 2024",
+      "membersCount": "10",
+      "leader": "Rahul Mehta",
+      "members": ["Rahul", "Sanjay", "Amit", "Kiran", "Vishal", "Pranav"],
+      "achievements": [
+        "🏆 Inter-IIT Winners 2024",
+        "🥈 Campus Cup Runners-Up 2023",
+      ],
+    };
+
+    Widget _buildTile(String title, String value, IconData icon) {
+      return Container(
+        margin: const EdgeInsets.symmetric(vertical: 8),
+        padding: const EdgeInsets.all(15),
+        decoration: BoxDecoration(
+          color: Colors.green.withOpacity(0.08),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: Colors.white.withOpacity(0.3)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.05),
+              blurRadius: 5,
+              offset: const Offset(0, 3),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            Icon(icon, color: Colors.green.shade700),
+            const SizedBox(width: 15),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      color: Colors.black54,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    value,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      color: Colors.black,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    // ✅ Cast members and achievements safely
+    final List<String> members = List<String>.from(teamInfo['members'] ?? []);
+    final List<String> achievements = List<String>.from(
+      teamInfo['achievements'] ?? [],
+    );
+
+    return Scaffold(
+      backgroundColor: const Color(0xFFE8F5E9),
+      extendBody: true,
+      appBar: AppBar(
+        backgroundColor: const Color(0xFFE8F5E9),
+        elevation: 0,
+        systemOverlayStyle: const SystemUiOverlayStyle(
+          statusBarColor: Colors.transparent,
+          statusBarIconBrightness:
+              Brightness.dark, // ✅ black status bar text/icons
+          statusBarBrightness: Brightness.light,
+        ),
+        leading: IconButton(
+          icon: const Icon(
+            Icons.arrow_back_ios_new_rounded,
+            color: Colors.black87,
+          ),
+          onPressed: () => Navigator.pop(context),
+        ),
+        title: Text(
+          teamName,
+          style: const TextStyle(
+            fontWeight: FontWeight.bold,
+            color: Colors.black87,
+          ),
+        ),
+      ),
+
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 25),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // ✅ Sport Tile
+            _buildTile("Sport", sportName, Icons.sports_soccer_rounded),
+
+            _buildTile(
+              "Date of Creation",
+              teamInfo['createdOn'] as String,
+              Icons.calendar_today_rounded,
+            ),
+            _buildTile(
+              "Team Members",
+              teamInfo['membersCount'] as String,
+              Icons.people_alt_rounded,
+            ),
+            _buildTile(
+              "Team Leader",
+              teamInfo['leader'] as String,
+              Icons.person_rounded,
+            ),
+
+            // ✅ Members List Tile
+            Container(
+              margin: const EdgeInsets.symmetric(vertical: 8),
+              padding: const EdgeInsets.all(15),
+              decoration: BoxDecoration(
+                color: Colors.green.withOpacity(0.08),
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: Colors.white.withOpacity(0.3)),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.05),
+                    blurRadius: 5,
+                    offset: const Offset(0, 3),
+                  ),
+                ],
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.groups, color: Colors.green.shade700),
+                      const SizedBox(width: 10),
+                      const Text(
+                        "Members List",
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.black87,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  ...members.map(
+                    (m) => Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Text(
+                        "• $m",
+                        style: const TextStyle(
+                          fontSize: 15,
+                          color: Colors.black87,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            // ✅ Achievements Tile
+            Container(
+              margin: const EdgeInsets.symmetric(vertical: 8),
+              padding: const EdgeInsets.all(15),
+              decoration: BoxDecoration(
+                color: Colors.green.withOpacity(0.08),
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: Colors.white.withOpacity(0.3)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.emoji_events, color: Colors.green.shade700),
+                      const SizedBox(width: 10),
+                      const Text(
+                        "Achievements",
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.black87,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  ...achievements.map(
+                    (a) => Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Text(
+                        "• $a",
+                        style: const TextStyle(
+                          fontSize: 15,
+                          color: Colors.black87,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 80), // space for button
+          ],
+        ),
+      ),
+
+      // ✅ Bottom Invite Team Button (same UI as Submit button)
+      bottomNavigationBar: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(80),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+            child: GestureDetector(
+              onTap: () {
+                showGlassAlert(context, "Team Invited Successfully!");
+                return;
+              },
+              child: Container(
+                height: 52,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF2E7D32).withOpacity(0.45),
+                  borderRadius: BorderRadius.circular(80),
+                  border: Border.all(color: Colors.green.withOpacity(0.4)),
+                ),
+                child: const Text(
+                  "Invite Team",
+                  style: TextStyle(
+                    color: Colors.black87,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 16,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class AppGreen {
+  static const Color deep = Color(0xFF2E7D32); // primary action
+  static const Color mid = Color(0xFF4CAF50); // secondary
+  static const Color light = Color(0xFFBFE3C0); // fills
+  static const Color card = Color(0xFFE8F5E9); // backgrounds
+  static const Color ink = Colors.black87;
+}
+
+/// ------------------------------------
+/// ADD / EDIT TEAM PAGE
+/// ------------------------------------
+class AddTeamPage extends StatefulWidget {
+  final String sportName;
+  final Map<String, dynamic>? existingTeam;
+
+  const AddTeamPage({super.key, required this.sportName, this.existingTeam});
+
+  @override
+  State<AddTeamPage> createState() => _AddTeamPageState();
+}
+
+class _AddTeamPageState extends State<AddTeamPage> {
+  final TextEditingController _teamNameController = TextEditingController();
+  final TextEditingController _memberCountController = TextEditingController();
+  final TextEditingController _achievementsController = TextEditingController();
+  final List<Map<String, TextEditingController>> _players = [];
+  late bool isEditMode;
+  late int _minPlayers;
+
+  @override
+  void initState() {
+    super.initState();
+    isEditMode = widget.existingTeam != null;
+    _minPlayers = _getMinPlayers(widget.sportName);
+
+    if (isEditMode) {
+      _teamNameController.text = (widget.existingTeam!['teamName'] ?? '')
+          .toString();
+      _memberCountController.text = (widget.existingTeam!['memberCount'] ?? '')
+          .toString();
+      _achievementsController.text = widget.existingTeam!['achievements'] ?? '';
+      final List players = widget.existingTeam!['players'] ?? [];
+      for (var p in players) {
+        _players.add({
+          'name': TextEditingController(text: p['name'] ?? ''),
+          'email': TextEditingController(text: p['email'] ?? ''),
+        });
+      }
+      if (_players.length < _minPlayers) {
+        for (int i = _players.length; i < _minPlayers; i++) {
+          _addPlayer();
+        }
+      }
+    } else {
+      for (int i = 0; i < _minPlayers; i++) {
+        _addPlayer();
+      }
+    }
+  }
+
+  int _getMinPlayers(String sport) {
+    switch (sport) {
+      case 'Football':
+        return 7;
+      case 'Basketball':
+        return 5;
+      case 'Cricket':
+        return 11;
+      case 'Volleyball':
+        return 6;
+      case 'Hockey':
+        return 11;
+      case 'Tennis':
+      case 'Badminton':
+      case 'Table Tennis':
+        return 2;
+      default:
+        return 5;
+    }
+  }
+
+  void _addPlayer() {
+    setState(() {
+      _players.add({
+        'name': TextEditingController(),
+        'email': TextEditingController(),
+      });
+    });
+  }
+
+  List<Map<String, String>> _collectPlayers() {
+    return _players
+        .map(
+          (p) => {
+            'name': p['name']!.text.trim(),
+            'email': p['email']!.text.trim(),
+          },
+        )
+        .where((p) => p['name']!.isNotEmpty)
+        .toList();
+  }
+
+  Widget glassButton(
+    String text, {
+    required Color color,
+    required VoidCallback onTap,
+    double blur = 14,
+    double opacity = 0.25,
+    double height = 52,
+    double radius = 18,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(radius),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
+          child: Container(
+            height: height,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: color.withOpacity(opacity),
+              borderRadius: BorderRadius.circular(radius),
+              border: Border.all(color: Colors.white.withOpacity(0.25)),
+              boxShadow: [
+                BoxShadow(
+                  color: color.withOpacity(0.2),
+                  blurRadius: 8,
+                  offset: const Offset(2, 3),
+                ),
+              ],
+            ),
+            child: Text(
+              text,
+              style: TextStyle(
+                color: AppGreen.deep.withOpacity(0.95),
+                fontSize: 15,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _submitTeam() {
+    final teamName = _teamNameController.text.trim();
+    final memberCount = _memberCountController.text.trim();
+    final achievements = _achievementsController.text.trim();
+    final players = _collectPlayers();
+
+    if (teamName.isEmpty) {
+      showGlassAlert(context, "Please enter a team name.");
+      return;
+    }
+    if (memberCount.isEmpty || int.tryParse(memberCount) == null) {
+      showGlassAlert(context, "Please enter a valid number of members.");
+      return;
+    }
+    if (players.length < _minPlayers) {
+      showGlassAlert(
+        context,
+        "Minimum $_minPlayers players required for ${widget.sportName}.",
+      );
+      return;
+    }
+
+    final teamData = {
+      'teamName': teamName,
+      'sport': widget.sportName,
+      'memberCount': int.parse(memberCount),
+      'achievements': achievements,
+      'players': players,
+      'leader': widget.existingTeam != null
+          ? (widget.existingTeam!['leader'] ?? '')
+          : '',
+      'createdOn': widget.existingTeam != null
+          ? (widget.existingTeam!['createdOn'] ?? '')
+          : '',
+      'isLeader': widget.existingTeam != null
+          ? (widget.existingTeam!['isLeader'] ?? false)
+          : true,
+    };
+
+    Navigator.pop(context, teamData);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFDDEEE1),
+      appBar: AppBar(
+        backgroundColor: AppGreen.card.withOpacity(0.25),
+        elevation: 0,
+        systemOverlayStyle: const SystemUiOverlayStyle(
+          statusBarColor: Colors.transparent,
+          statusBarIconBrightness: Brightness.dark,
+          statusBarBrightness: Brightness.light,
+        ),
+        title: Text(
+          isEditMode ? "Edit Team" : "Create Team",
+          style: const TextStyle(
+            color: AppGreen.ink,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        iconTheme: const IconThemeData(color: AppGreen.ink),
+      ),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(18),
+                child: BackdropFilter(
+                  filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: AppGreen.card.withOpacity(0.7),
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(color: AppGreen.mid.withOpacity(0.25)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          widget.sportName,
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            color: AppGreen.ink,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          "Minimum players required: $_minPlayers",
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.black.withOpacity(0.6),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 18),
+
+              TextField(
+                controller: _teamNameController,
+                style: const TextStyle(color: AppGreen.ink),
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: AppGreen.light.withOpacity(0.3),
+                  labelText: "Team Name",
+                  labelStyle: const TextStyle(
+                    color: AppGreen.ink,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+
+              TextField(
+                controller: _memberCountController,
+                keyboardType: TextInputType.number,
+                style: const TextStyle(color: AppGreen.ink),
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: AppGreen.light.withOpacity(0.3),
+                  labelText: "Team Members Count",
+                  labelStyle: const TextStyle(
+                    color: AppGreen.ink,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+
+              TextField(
+                controller: _achievementsController,
+                style: const TextStyle(color: AppGreen.ink),
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: AppGreen.light.withOpacity(0.3),
+                  labelText: "Team Achievements (optional)",
+                  hintText: "e.g. Inter IIT Champions 2024",
+                  labelStyle: const TextStyle(
+                    color: AppGreen.ink,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+
+              const Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  "Player Details",
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: AppGreen.ink,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+
+              Expanded(
+                child: ListView(
+                  children: [
+                    ..._players.asMap().entries.map((entry) {
+                      final index = entry.key;
+                      final player = entry.value;
+                      return ClipRRect(
+                        borderRadius: BorderRadius.circular(16),
+                        child: BackdropFilter(
+                          filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+                          child: Container(
+                            margin: const EdgeInsets.only(bottom: 14),
+                            padding: const EdgeInsets.all(14),
+                            decoration: BoxDecoration(
+                              color: AppGreen.card.withOpacity(0.8),
+                              borderRadius: BorderRadius.circular(16),
+                              border: Border.all(
+                                color: AppGreen.mid.withOpacity(0.25),
+                              ),
+                            ),
+                            child: Column(
+                              children: [
+                                TextField(
+                                  controller: player['name'],
+                                  style: const TextStyle(color: AppGreen.ink),
+                                  decoration: InputDecoration(
+                                    filled: true,
+                                    fillColor: AppGreen.light.withOpacity(0.3),
+                                    labelText: "Player ${index + 1} Name",
+                                    labelStyle: const TextStyle(
+                                      color: AppGreen.ink,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                    border: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 10),
+                                TextField(
+                                  controller: player['email'],
+                                  style: const TextStyle(color: AppGreen.ink),
+                                  decoration: InputDecoration(
+                                    filled: true,
+                                    fillColor: AppGreen.light.withOpacity(0.3),
+                                    labelText: "Email (optional)",
+                                    labelStyle: const TextStyle(
+                                      color: AppGreen.ink,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                    border: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    }),
+                    Center(
+                      child: glassButton(
+                        "➕ Add Player",
+                        color: AppGreen.mid,
+                        opacity: 0.22,
+                        height: 38,
+                        radius: 80,
+                        onTap: _addPlayer,
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                  ],
+                ),
+              ),
+
+              glassButton(
+                isEditMode ? "Apply Changes" : "Create Team",
+                color: AppGreen.deep,
+                opacity: 0.28,
+                onTap: _submitTeam,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// ------------------------------------
+/// PROFILE PAGE
+/// ------------------------------------
 class ProfilePage extends StatefulWidget {
   const ProfilePage({super.key});
 
@@ -1969,26 +4187,85 @@ class ProfilePage extends StatefulWidget {
 }
 
 class _ProfilePageState extends State<ProfilePage> {
-  bool isEditing = false;
-
   String name = "John Doe";
   String email = "john.doe@gmail.com";
   String phone = "+91 9876543210";
   String sports = "Football, Cricket";
-  String achievements = "🏆 5 Tournaments | ⚽ 30 Matches | 🥇 12 Wins";
+
+  /// Achievements grouped by sport (Option A)
+  /// Each sport has `records` (multiple achievements)
+  List<Map<String, dynamic>> achievements = [
+    {
+      "sport": "Football",
+      "experience": "5 Years",
+      "records": [
+        {
+          "tournament": "Inter-IIT Sports Meet",
+          "year": "2024",
+          "achievement": "Gold Medal",
+        },
+        {
+          "tournament": "City League",
+          "year": "2023",
+          "achievement": "Runner Up",
+        },
+      ],
+    },
+    {
+      "sport": "Cricket",
+      "experience": "3 Years",
+      "records": [
+        {
+          "tournament": "Tech Premier League",
+          "year": "2023",
+          "achievement": "Runner Up",
+        },
+      ],
+    },
+    {
+      "sport": "Badminton",
+      "records": [
+        {
+          "tournament": "Campus Championship",
+          "year": "2022",
+          "achievement": "Champion",
+        },
+      ],
+    },
+  ];
+
+  List<Map<String, dynamic>> teamsList = [
+    {
+      "teamName": "Rising Strikers",
+      "sport": "Football",
+      "leader": "Alex Johnson",
+      "createdOn": "12 Mar 2023",
+      "isLeader": true,
+      "memberCount": 11,
+      "players": const [],
+      "achievements": "Inter-IIT 2024 Champions",
+    },
+    {
+      "teamName": "Court Smashers",
+      "sport": "Badminton",
+      "leader": "Sanjay Kumar",
+      "createdOn": "8 Jan 2024",
+      "isLeader": false,
+      "memberCount": 2,
+      "players": const [],
+      "achievements": "",
+    },
+  ];
 
   @override
   Widget build(BuildContext context) {
-    navController.setIndex(4); // highlight profile icon
     return Scaffold(
-      backgroundColor: const Color(0xFFE8F5E9),
-      extendBody: true,
+      backgroundColor: const Color(0xFFF1FAF1),
       body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 25),
           child: Column(
             children: [
-              // --- Title ---
               const Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
@@ -1996,28 +4273,25 @@ class _ProfilePageState extends State<ProfilePage> {
                   style: TextStyle(
                     fontSize: 22,
                     fontWeight: FontWeight.bold,
-                    color: Colors.black87,
+                    color: AppGreen.ink,
                   ),
                 ),
               ),
               const SizedBox(height: 25),
 
-              // --- Profile Picture ---
               Stack(
                 alignment: Alignment.center,
                 children: [
-                  CircleAvatar(
+                  const CircleAvatar(
                     radius: 70,
-                    backgroundColor: const Color(0xFFD4E7D0),
-                    backgroundImage: const AssetImage('assets/profile_pic.png'),
+                    backgroundColor: Color(0xFFD4E7D0),
+                    backgroundImage: AssetImage('assets/profile_pic.png'),
                   ),
                   Positioned(
                     bottom: 5,
                     right: 8,
                     child: InkWell(
-                      onTap: () {
-                        // TODO: Implement image picker
-                      },
+                      onTap: () {},
                       child: Container(
                         decoration: const BoxDecoration(
                           shape: BoxShape.circle,
@@ -2026,7 +4300,7 @@ class _ProfilePageState extends State<ProfilePage> {
                         padding: const EdgeInsets.all(5),
                         child: const Icon(
                           Icons.edit,
-                          color: Colors.black87,
+                          color: AppGreen.ink,
                           size: 18,
                         ),
                       ),
@@ -2034,10 +4308,8 @@ class _ProfilePageState extends State<ProfilePage> {
                   ),
                 ],
               ),
-
               const SizedBox(height: 25),
 
-              // --- Name and Edit Toggle ---
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
@@ -2056,19 +4328,47 @@ class _ProfilePageState extends State<ProfilePage> {
                       color: Colors.black54,
                       size: 20,
                     ),
-                    onPressed: () {
-                      setState(() => isEditing = !isEditing);
+                    onPressed: () async {
+                      final result = await Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => EditProfilePage(
+                            name: name,
+                            email: email,
+                            phone: phone,
+                            sports: sports,
+                            achievements: achievements,
+                            teamsList: teamsList,
+                          ),
+                        ),
+                      );
+
+                      if (result != null && result is Map<String, dynamic>) {
+                        setState(() {
+                          name = result['name'];
+                          email = result['email'];
+                          phone = result['phone'];
+                          sports = result['sports'];
+                          achievements = List<Map<String, dynamic>>.from(
+                            result['achievements'],
+                          );
+                          teamsList = List<Map<String, dynamic>>.from(
+                            result['teamsList'],
+                          );
+                        });
+                      }
                     },
                   ),
                 ],
               ),
               const SizedBox(height: 20),
 
-              // --- Information Fields ---
               _buildInfoTile("Email", email, Icons.email),
               _buildInfoTile("Mobile", phone, Icons.phone),
               _buildInfoTile("Interested Sports", sports, Icons.sports_soccer),
+
               _buildAchievementsCard(),
+              _buildTeamsSection(),
 
               const SizedBox(height: 30),
             ],
@@ -2080,107 +4380,122 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 
   Widget _buildAchievementsCard() {
-    final achievementsList = [
-      {
-        "sport": "Football",
-        "tournament": "Inter-IIT Sports Meet",
-        "year": "2024",
-        "achievement": "Gold Medal",
-        "experience": "5 Years",
-      },
-      {
-        "sport": "Cricket",
-        "tournament": "Tech Premier League",
-        "year": "2023",
-        "achievement": "Runner Up",
-        "experience": "3 Years",
-      },
-      {
-        "sport": "Badminton",
-        "tournament": "Campus Championship",
-        "year": "2022",
-        "achievement": "Champion",
-        "experience": "4 Years",
-      },
-    ];
-
     return Container(
-      margin: const EdgeInsets.symmetric(vertical: 8),
+      margin: const EdgeInsets.symmetric(vertical: 12),
       padding: const EdgeInsets.all(15),
-      decoration: BoxDecoration(
-        color: Colors.green.withOpacity(0.08),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white.withOpacity(0.3)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 5,
-            offset: const Offset(0, 3),
-          ),
-        ],
-      ),
+      decoration: _greenCardDecoration(),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(Icons.emoji_events, color: Colors.green.shade700),
+              Icon(Icons.emoji_events, color: AppGreen.deep),
               const SizedBox(width: 10),
               const Text(
                 "Achievements",
                 style: TextStyle(
                   fontSize: 16,
                   fontWeight: FontWeight.bold,
-                  color: Colors.black87,
+                  color: AppGreen.ink,
                 ),
               ),
             ],
           ),
           const SizedBox(height: 10),
 
-          // --- Each Achievement Card ---
-          ...achievementsList.map((item) {
+          ...achievements.map((sportBlock) {
+            final String sport = sportBlock['sport'];
+            final List records = sportBlock['records'] ?? [];
             return Container(
               margin: const EdgeInsets.only(bottom: 12),
               padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.green.shade200.withOpacity(0.4),
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(
-                  color: Colors.green.shade400.withOpacity(0.6),
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.05),
-                    blurRadius: 4,
-                    offset: const Offset(0, 2),
-                  ),
-                ],
-              ),
+              decoration: _innerTileDecoration(),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    "${item['sport']} • ${item['year']}",
+                    sport,
                     style: const TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.black87,
+                      fontWeight: FontWeight.w700,
+                      color: AppGreen.ink,
                     ),
                   ),
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 8),
+                  ...records.map((r) {
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: AppGreen.light.withOpacity(0.25),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: AppGreen.mid.withOpacity(0.4),
+                        ),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            "${r['tournament']} • ${r['year']}",
+                            style: const TextStyle(fontWeight: FontWeight.w600),
+                          ),
+                          Text("Achievement: ${r['achievement']}"),
+                          Text("Experience: ${r['experience']}"),
+                        ],
+                      ),
+                    );
+                  }),
+                ],
+              ),
+            );
+          }).toList(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTeamsSection() {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 12),
+      padding: const EdgeInsets.all(15),
+      decoration: _greenCardDecoration(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.groups_rounded, color: AppGreen.deep),
+              const SizedBox(width: 10),
+              const Text(
+                "Team Details",
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: AppGreen.ink,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          ...teamsList.map((team) {
+            return Container(
+              margin: const EdgeInsets.only(bottom: 14),
+              padding: const EdgeInsets.all(14),
+              decoration: _innerTileDecoration(),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
                   Text(
-                    "Tournament: ${item['tournament']}",
-                    style: const TextStyle(fontSize: 14, color: Colors.black87),
+                    team['teamName'],
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      color: AppGreen.ink,
+                    ),
                   ),
-                  Text(
-                    "Achievement: ${item['achievement']}",
-                    style: const TextStyle(fontSize: 14, color: Colors.black87),
-                  ),
-                  Text(
-                    "Experience: ${item['experience']}",
-                    style: const TextStyle(fontSize: 14, color: Colors.black54),
-                  ),
+                  Text("Sport: ${team['sport']}"),
+                  Text("Leader: ${team['leader']}"),
+                  Text("Created On: ${team['createdOn']}"),
                 ],
               ),
             );
@@ -2190,77 +4505,61 @@ class _ProfilePageState extends State<ProfilePage> {
     );
   }
 
+  BoxDecoration _greenCardDecoration() {
+    return BoxDecoration(
+      color: AppGreen.card.withOpacity(0.9),
+      borderRadius: BorderRadius.circular(18),
+      border: Border.all(color: AppGreen.mid.withOpacity(0.25)),
+      boxShadow: [
+        BoxShadow(
+          color: AppGreen.mid.withOpacity(0.2),
+          blurRadius: 8,
+          offset: const Offset(0, 4),
+        ),
+      ],
+    );
+  }
+
+  BoxDecoration _innerTileDecoration() {
+    return BoxDecoration(
+      color: AppGreen.light.withOpacity(0.35),
+      borderRadius: BorderRadius.circular(14),
+      border: Border.all(color: AppGreen.mid.withOpacity(0.4)),
+    );
+  }
+
   Widget _buildInfoTile(String label, String value, IconData icon) {
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 8),
       padding: const EdgeInsets.all(15),
-      decoration: BoxDecoration(
-        color: Colors.green.withOpacity(0.08),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white.withOpacity(0.3)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 5,
-            offset: const Offset(0, 3),
-          ),
-        ],
-      ),
+      decoration: _greenCardDecoration(),
       child: Row(
         children: [
-          Icon(icon, color: Colors.green.shade700),
+          Icon(icon, color: AppGreen.deep),
           const SizedBox(width: 15),
           Expanded(
-            child: isEditing
-                ? TextFormField(
-                    initialValue: value,
-                    style: const TextStyle(fontSize: 16),
-                    decoration: InputDecoration(
-                      labelText: label,
-                      labelStyle: const TextStyle(color: Colors.black54),
-                      border: InputBorder.none,
-                    ),
-                    onChanged: (newVal) {
-                      setState(() {
-                        switch (label) {
-                          case "Email":
-                            email = newVal;
-                            break;
-                          case "Mobile":
-                            phone = newVal;
-                            break;
-                          case "Interested Sports":
-                            sports = newVal;
-                            break;
-                          case "Achievements":
-                            achievements = newVal;
-                            break;
-                        }
-                      });
-                    },
-                  )
-                : Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        label,
-                        style: const TextStyle(
-                          fontSize: 14,
-                          color: Colors.black54,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        value,
-                        style: const TextStyle(
-                          fontSize: 16,
-                          color: Colors.black,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ],
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    color: Colors.black54,
+                    fontWeight: FontWeight.w500,
                   ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  value,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    color: Colors.black,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
           ),
         ],
       ),
@@ -2268,62 +4567,601 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 }
 
-class BookingHistoryPage extends StatelessWidget {
-  const BookingHistoryPage({super.key});
+/// ------------------------------------
+/// EDIT PROFILE PAGE
+/// ------------------------------------
+class EditProfilePage extends StatefulWidget {
+  final String name;
+  final String email;
+  final String phone;
+  final String sports;
+  final List<Map<String, dynamic>> achievements; // grouped by sport
+  final List<Map<String, dynamic>> teamsList;
+
+  const EditProfilePage({
+    super.key,
+    required this.name,
+    required this.email,
+    required this.phone,
+    required this.sports,
+    required this.achievements,
+    required this.teamsList,
+  });
+
+  @override
+  State<EditProfilePage> createState() => _EditProfilePageState();
+}
+
+class _EditProfilePageState extends State<EditProfilePage> {
+  late final TextEditingController _name = TextEditingController(
+    text: widget.name,
+  );
+  late final TextEditingController _email = TextEditingController(
+    text: widget.email,
+  );
+  late final TextEditingController _phone = TextEditingController(
+    text: widget.phone,
+  );
+  late final TextEditingController _sports = TextEditingController(
+    text: widget.sports,
+  );
+
+  late List<Map<String, dynamic>> teamsList;
+  late List<Map<String, dynamic>>
+  achievements; // [{sport:String, records: [ {...}, {...} ]}]
+
+  final BoxDecoration _tileBox = BoxDecoration(
+    color: AppGreen.light.withOpacity(0.35),
+    borderRadius: BorderRadius.circular(14),
+    border: Border.all(color: AppGreen.mid.withOpacity(0.5)),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    teamsList = widget.teamsList
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+    achievements = widget.achievements.map((e) {
+      return {
+        "sport": e["sport"],
+        "records": List<Map<String, dynamic>>.from(e["records"] ?? []),
+      };
+    }).toList();
+  }
 
   @override
   Widget build(BuildContext context) {
-    navController.setIndex(3); // highlight booking icon
-    // use the shared global bookings store so new bookings appear here
-    final List<Map<String, dynamic>> bookings = globalBookings;
+    return Scaffold(
+      backgroundColor: const Color(0xFFDDEEE1),
+      appBar: AppBar(
+        backgroundColor: AppGreen.card.withOpacity(0.25),
+        elevation: 0,
+        title: const Text(
+          "Edit Profile",
+          style: TextStyle(color: AppGreen.ink, fontWeight: FontWeight.w600),
+        ),
+        iconTheme: const IconThemeData(color: AppGreen.ink),
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            _field("Name", _name),
+            _field("Email", _email),
+            _field("Mobile", _phone),
+            _field("Interested Sports", _sports),
+            const SizedBox(height: 20),
+            _achievementsSection(),
+            const SizedBox(height: 20),
+            _teamsSection(),
+            const SizedBox(height: 25),
+            _saveButton(),
+          ],
+        ),
+      ),
+    );
+  }
 
+  Widget _field(String label, TextEditingController c) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 14),
+      child: TextField(
+        controller: c,
+        style: const TextStyle(color: AppGreen.ink),
+        decoration: InputDecoration(
+          filled: true,
+          fillColor: AppGreen.light.withOpacity(0.3),
+          labelText: label,
+          labelStyle: const TextStyle(
+            color: AppGreen.ink,
+            fontWeight: FontWeight.w500,
+          ),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      ),
+    );
+  }
+
+  Widget _achievementsSection() {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: AppGreen.card.withOpacity(0.9),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: AppGreen.mid.withOpacity(0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            "Achievements",
+            style: TextStyle(
+              fontWeight: FontWeight.w600,
+              fontSize: 16,
+              color: AppGreen.ink,
+            ),
+          ),
+          const SizedBox(height: 12),
+
+          ...achievements.asMap().entries.map((entry) {
+            final i = entry.key;
+            final sportBlock = entry.value;
+
+            final sportController = TextEditingController(
+              text: sportBlock['sport'],
+            );
+            final experienceController = TextEditingController(
+              text: sportBlock['experience'] ?? "",
+            );
+            final List<Map<String, dynamic>> records =
+                List<Map<String, dynamic>>.from(sportBlock['records'] ?? []);
+
+            return Container(
+              margin: const EdgeInsets.only(bottom: 14),
+              padding: const EdgeInsets.all(12),
+              decoration: _tileBox,
+              child: Column(
+                children: [
+                  _inlineTextField(
+                    "Sport",
+                    sportController,
+                    onChanged: (v) => achievements[i]['sport'] = v,
+                  ),
+                  _inlineTextField(
+                    "Experience (e.g. 5 Years)",
+                    experienceController,
+                    onChanged: (v) => achievements[i]['experience'] = v,
+                  ),
+
+                  const SizedBox(height: 10),
+
+                  ...records.asMap().entries.map((recEntry) {
+                    final rIdx = recEntry.key;
+                    final r = Map<String, dynamic>.from(recEntry.value);
+
+                    final tournamentC = TextEditingController(
+                      text: r['tournament'] ?? '',
+                    );
+                    final yearC = TextEditingController(text: r['year'] ?? '');
+                    final achievementC = TextEditingController(
+                      text: r['achievement'] ?? '',
+                    );
+
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 10),
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: AppGreen.light.withOpacity(0.25),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: AppGreen.mid.withOpacity(0.4),
+                        ),
+                      ),
+                      child: Column(
+                        children: [
+                          _inlineTextField(
+                            "Tournament",
+                            tournamentC,
+                            onChanged: (v) =>
+                                achievements[i]['records'][rIdx]['tournament'] =
+                                    v,
+                          ),
+                          _inlineTextField(
+                            "Year",
+                            yearC,
+                            onChanged: (v) =>
+                                achievements[i]['records'][rIdx]['year'] = v,
+                          ),
+                          _inlineTextField(
+                            "Achievement",
+                            achievementC,
+                            onChanged: (v) =>
+                                achievements[i]['records'][rIdx]['achievement'] =
+                                    v,
+                          ),
+
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: TextButton.icon(
+                              onPressed: () => setState(
+                                () => achievements[i]['records'].removeAt(rIdx),
+                              ),
+                              icon: const Icon(
+                                Icons.delete_outline,
+                                color: AppGreen.deep,
+                              ),
+                              label: const Text(
+                                "Remove Achievement",
+                                style: TextStyle(color: AppGreen.deep),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }).toList(),
+
+                  Align(
+                    alignment: Alignment.center,
+                    child: TextButton.icon(
+                      onPressed: () {
+                        setState(() {
+                          achievements[i]['records'].add({
+                            "tournament": "",
+                            "year": "",
+                            "achievement": "",
+                          });
+                        });
+                      },
+                      icon: const Icon(
+                        Icons.add_circle_outline,
+                        color: AppGreen.deep,
+                      ),
+                      label: const Text(
+                        "Add Achievement",
+                        style: TextStyle(
+                          color: AppGreen.deep,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+
+                  const Divider(height: 20),
+
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton.icon(
+                      onPressed: () => setState(() => achievements.removeAt(i)),
+                      icon: const Icon(
+                        Icons.delete_forever,
+                        color: AppGreen.deep,
+                      ),
+                      label: const Text(
+                        "Remove Sport",
+                        style: TextStyle(color: AppGreen.deep),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }),
+
+          Align(
+            alignment: Alignment.center,
+            child: TextButton.icon(
+              onPressed: () {
+                setState(() {
+                  achievements.add({
+                    "sport": "",
+                    "experience": "",
+                    "records": [
+                      {"tournament": "", "year": "", "achievement": ""},
+                    ],
+                  });
+                });
+              },
+              icon: const Icon(Icons.sports_handball, color: AppGreen.deep),
+              label: const Text(
+                "Add Sports Data",
+                style: TextStyle(
+                  color: AppGreen.deep,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _inlineTextField(
+    String label,
+    TextEditingController c, {
+    ValueChanged<String>? onChanged,
+  }) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: TextField(
+        controller: c,
+        onChanged: onChanged,
+        style: const TextStyle(color: AppGreen.ink),
+        decoration: InputDecoration(
+          isDense: true,
+          filled: true,
+          fillColor: AppGreen.light.withOpacity(0.28),
+          labelText: label,
+          labelStyle: const TextStyle(
+            color: AppGreen.ink,
+            fontWeight: FontWeight.w500,
+          ),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+        ),
+      ),
+    );
+  }
+
+  Widget _teamsSection() {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: AppGreen.card.withOpacity(0.9),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: AppGreen.mid.withOpacity(0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            "Teams",
+            style: TextStyle(
+              fontWeight: FontWeight.w600,
+              fontSize: 16,
+              color: AppGreen.ink,
+            ),
+          ),
+          const SizedBox(height: 12),
+
+          ...teamsList.asMap().entries.map((entry) {
+            int i = entry.key;
+            var team = entry.value;
+
+            return Container(
+              margin: const EdgeInsets.only(bottom: 12),
+              padding: const EdgeInsets.all(12),
+              decoration: _tileBox,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    team['teamName'],
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      color: AppGreen.ink,
+                    ),
+                  ),
+                  Text("Sport: ${team['sport']}"),
+                  Text("Leader: ${team['leader']}"),
+                  Text("Created On: ${team['createdOn']}"),
+                  const SizedBox(height: 8),
+
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: (team['isLeader'] == true)
+                        ? TextButton.icon(
+                            icon: const Icon(
+                              Icons.edit,
+                              size: 18,
+                              color: AppGreen.deep,
+                            ),
+                            label: const Text(
+                              "Edit Team",
+                              style: TextStyle(color: AppGreen.deep),
+                            ),
+                            onPressed: () async {
+                              final updatedTeam = await Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => AddTeamPage(
+                                    sportName: team['sport'],
+                                    existingTeam: team,
+                                  ),
+                                ),
+                              );
+                              if (updatedTeam != null) {
+                                setState(() => teamsList[i] = updatedTeam);
+                              }
+                            },
+                          )
+                        : TextButton.icon(
+                            onPressed: () {
+                              setState(() => teamsList.removeAt(i));
+                            },
+                            icon: const Icon(
+                              Icons.exit_to_app,
+                              color: AppGreen.deep,
+                            ),
+                            label: const Text(
+                              "Quit Team",
+                              style: TextStyle(color: AppGreen.deep),
+                            ),
+                          ),
+                  ),
+                ],
+              ),
+            );
+          }).toList(),
+        ],
+      ),
+    );
+  }
+
+  Widget glassButton(
+    String text, {
+    required Color color,
+    required double opacity,
+    required VoidCallback onTap,
+    double blur = 14,
+    double height = 52,
+    double radius = 18,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(radius),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
+          child: Container(
+            height: height,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: color.withOpacity(opacity),
+              borderRadius: BorderRadius.circular(radius),
+              border: Border.all(color: Colors.white.withOpacity(0.25)),
+              boxShadow: [
+                BoxShadow(
+                  color: color.withOpacity(0.2),
+                  blurRadius: 8,
+                  offset: const Offset(2, 3),
+                ),
+              ],
+            ),
+            child: const Text(
+              "Save Changes",
+              style: TextStyle(
+                color: Color(0xFF2E7D32), // AppGreen.deep
+                fontSize: 15,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _saveButton() {
+    return glassButton(
+      "Save Changes",
+      color: AppGreen.deep,
+      opacity: 0.28,
+      onTap: () {
+        Navigator.pop(context, {
+          "name": _name.text.trim(),
+          "email": _email.text.trim(),
+          "phone": _phone.text.trim(),
+          "sports": _sports.text.trim(),
+          "achievements": achievements,
+          "teamsList": teamsList,
+        });
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text("Profile Updated Successfully!"),
+            backgroundColor: AppGreen.deep,
+          ),
+        );
+      },
+    );
+  }
+}
+
+class BookingHistoryPage extends StatefulWidget {
+  const BookingHistoryPage({super.key});
+  @override
+  State<BookingHistoryPage> createState() => _BookingHistoryPageState();
+}
+
+class _BookingHistoryPageState extends State<BookingHistoryPage> {
+  List<Map<String, dynamic>> bookings = [];
+  bool isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchBookings();
+  }
+
+  Future<void> _fetchBookings() async {
+    try {
+      final response = await http.post(
+        Uri.parse("https://172.26.13.101/api/bookings/"),
+      );
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        setState(() {
+          bookings = List<Map<String, dynamic>>.from(data);
+          isLoading = false;
+        });
+      } else {
+        setState(() => isLoading = false);
+      }
+    } catch (e) {
+      setState(() => isLoading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    navController.setIndex(3);
     return Scaffold(
       backgroundColor: const Color(0xFFE8F5E9),
       extendBody: true,
       body: SafeArea(
-        child: Column(
-          children: [
-            // --- Static Title Bar ---
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: const [
-                  Text(
-                    "Booking History",
-                    style: TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.black87,
+        child: isLoading
+            ? const Center(child: CircularProgressIndicator())
+            : Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 15,
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: const [
+                        Text(
+                          "Booking History",
+                          style: TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        Icon(
+                          Icons.history_rounded,
+                          color: Colors.black54,
+                          size: 26,
+                        ),
+                      ],
                     ),
                   ),
-                  Icon(Icons.history_rounded, color: Colors.black54, size: 26),
+                  Expanded(
+                    child: SingleChildScrollView(
+                      physics: const BouncingScrollPhysics(),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 20,
+                        vertical: 10,
+                      ),
+                      child: Column(
+                        children: bookings
+                            .map(
+                              (booking) => _buildBookingTile(context, booking),
+                            )
+                            .toList(),
+                      ),
+                    ),
+                  ),
                 ],
               ),
-            ),
-
-            // --- Scrollable Bookings Section ---
-            Expanded(
-              child: SingleChildScrollView(
-                physics: const BouncingScrollPhysics(),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 20,
-                  vertical: 10,
-                ),
-                child: Column(
-                  children: bookings
-                      .map((booking) => _buildBookingTile(context, booking))
-                      .toList(),
-                ),
-              ),
-            ),
-          ],
-        ),
       ),
       bottomNavigationBar: const PersistentNavBar(),
     );
   }
 
+  // Hide Team Members for now
   Widget _buildBookingTile(BuildContext context, Map<String, dynamic> booking) {
     return Container(
       margin: const EdgeInsets.only(bottom: 20),
@@ -2332,130 +5170,15 @@ class BookingHistoryPage extends StatelessWidget {
         color: Colors.green.withOpacity(0.08),
         borderRadius: BorderRadius.circular(18),
         border: Border.all(color: Colors.white.withOpacity(0.3)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 6,
-            offset: const Offset(0, 3),
-          ),
-        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              const Icon(
-                Icons.event_note_rounded,
-                color: Colors.black54,
-                size: 18,
-              ),
-              const SizedBox(width: 6),
-              Text(
-                "Booked On: ${booking['bookingDateTime']}",
-                style: const TextStyle(
-                  fontSize: 14,
-                  color: Colors.black87,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          _infoPill(Icons.sports_soccer, "Sport", booking['sport']),
-          const SizedBox(height: 8),
-          _infoPill(Icons.place_rounded, "Ground", booking['ground']),
-          const SizedBox(height: 8),
-          _infoPill(
-            Icons.confirmation_number_rounded,
-            "Slots",
-            booking['slots'],
-          ),
-          const SizedBox(height: 8),
-          _infoPill(
-            Icons.calendar_today_rounded,
-            "Slot Date",
-            booking['slotDate'],
-          ),
-          const SizedBox(height: 8),
-          _infoPill(
-            Icons.access_time_filled_rounded,
-            "Time",
-            booking['slotTime'],
-          ),
-          const SizedBox(height: 16),
-          const Text(
-            "Team Members:",
-            style: TextStyle(
-              fontWeight: FontWeight.w600,
-              color: Colors.black87,
-              fontSize: 15,
-            ),
-          ),
-          const SizedBox(height: 6),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: (booking['team'] as List<dynamic>)
-                .map(
-                  (member) => Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 3),
-                    child: Row(
-                      children: [
-                        const Icon(
-                          Icons.person,
-                          size: 18,
-                          color: Colors.black54,
-                        ),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Text(
-                            "${member['name']} (${member['email']})",
-                            style: const TextStyle(
-                              fontSize: 14,
-                              color: Colors.black87,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                )
-                .toList(),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _infoPill(IconData icon, String label, String value) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: Colors.green.shade200.withOpacity(0.4),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.green.shade400.withOpacity(0.6)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 16, color: Colors.green.shade800),
-          const SizedBox(width: 6),
-          Text(
-            "$label: ",
-            style: TextStyle(
-              color: Colors.green.shade900,
-              fontWeight: FontWeight.w600,
-              fontSize: 13,
-            ),
-          ),
-          Text(
-            value,
-            style: TextStyle(
-              color: Colors.green.shade900,
-              fontSize: 13,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
+          Text("Sport: ${booking['sport']}"),
+          Text("Ground: ${booking['ground']}"),
+          Text("Date: ${booking['slotDate']}"),
+          Text("Slot: ${booking['slots']}"),
+          // # Temporarily hide team section (backend not ready)
         ],
       ),
     );
@@ -2484,6 +5207,8 @@ class FinalSlotBookingPage extends StatefulWidget {
 
 class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
   final List<Map<String, TextEditingController>> _players = [];
+  bool _insideCampus = true; // ✅ by default true
+  bool _checkingLocation = true;
 
   @override
   void initState() {
@@ -2497,6 +5222,24 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
       }
     } else {
       _addPlayer();
+    }
+    _checkCampusAccess(); // ✅ check campus location at start
+  }
+
+  Future<void> _checkCampusAccess() async {
+    bool allowed = await isInsideCampus();
+    if (!mounted) return;
+    setState(() {
+      _insideCampus = allowed;
+      _checkingLocation = false;
+    });
+    if (!allowed) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        showGlassAlert(
+          context,
+          "You must be inside IIT Ropar campus to use restricted features",
+        );
+      });
     }
   }
 
@@ -2568,6 +5311,54 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
     );
   }
 
+  Future<void> _submitBooking() async {
+    final bookingData = {
+      "name": "Placeholder Name", // replace later
+      "email": "placeholder@email.com", // replace later
+      "sport": widget.sport,
+      "ground": widget.ground,
+      "slotDate": widget.slotDate,
+      "selectedSlots": widget.selectedSlots,
+      "team": _collectPlayers(),
+    };
+
+    try {
+      final response = await http.post(
+        Uri.parse("https://172.26.13.101/api/bookings/my/"), // your endpoint
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode(bookingData),
+      );
+
+      if (response.statusCode == 200) {
+        globalNotifications.add({
+          "title": "Booking Confirmed",
+          "message":
+              "Your booking for ${widget.sport} on ${widget.slotDate} is confirmed.",
+          "time": "Just now",
+        });
+
+        globalBookings.add({
+          "bookingDateTime": DateTime.now().toString(),
+          "sport": widget.sport,
+          "ground": widget.ground,
+          "slots": widget.selectedSlots.join(", "),
+          "slotDate": widget.slotDate,
+          "slotTime": widget.selectedSlots.first,
+          "team": _collectPlayers(),
+        });
+
+        if (mounted) {
+          Navigator.of(context).popUntil((route) => route.isFirst);
+          showGlassAlert(context, "Booking successful!");
+        }
+      } else {
+        showGlassAlert(context, "Booking failed. Please try again.");
+      }
+    } catch (e) {
+      showGlassAlert(context, "Network error: $e");
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -2576,18 +5367,32 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
       appBar: AppBar(
         backgroundColor: Colors.green.withOpacity(0.05),
         elevation: 0,
+        systemOverlayStyle: const SystemUiOverlayStyle(
+          statusBarColor: Colors.transparent,
+          statusBarIconBrightness: Brightness.dark, // ✅ black icons
+          statusBarBrightness: Brightness.light, // ✅ for iOS
+        ),
         title: const Text(
           'Confirm Booking',
           style: TextStyle(color: Colors.black87, fontWeight: FontWeight.w600),
         ),
         iconTheme: const IconThemeData(color: Colors.black87),
+        actions: [
+          IconButton(
+            onPressed: _checkCampusAccess,
+            icon: const Icon(Icons.my_location, color: Colors.green),
+            tooltip: "Recheck Campus Access",
+          ),
+        ],
       ),
+
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
             children: [
               // --- Top Glass Info Card ---
+              // (unchanged code)
               ClipRRect(
                 borderRadius: BorderRadius.circular(18),
                 child: BackdropFilter(
@@ -2696,12 +5501,6 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
                                     border: OutlineInputBorder(
                                       borderRadius: BorderRadius.circular(12),
                                     ),
-                                    enabledBorder: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                      borderSide: BorderSide(
-                                        color: Colors.green.withOpacity(0.3),
-                                      ),
-                                    ),
                                   ),
                                 ),
                                 const SizedBox(height: 10),
@@ -2721,12 +5520,6 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
                                     border: OutlineInputBorder(
                                       borderRadius: BorderRadius.circular(12),
                                     ),
-                                    enabledBorder: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                      borderSide: BorderSide(
-                                        color: Colors.green.withOpacity(0.3),
-                                      ),
-                                    ),
                                   ),
                                 ),
                               ],
@@ -2736,14 +5529,13 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
                       );
                     }),
 
-                    // --- Add More Players (More pill shaped) ---
                     Center(
                       child: glassButton(
                         "➕ Add Player",
                         color: const Color(0xFFB9E4B1),
                         opacity: 0.25,
-                        height: 38, // slimmer height
-                        radius: 80, // smoother, more pill-like
+                        height: 38,
+                        radius: 80,
                         padding: const EdgeInsets.symmetric(horizontal: 22),
                         onTap: _addPlayer,
                       ),
@@ -2762,15 +5554,14 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
                       color: const Color(0xFF4CAF50),
                       opacity: 0.25,
                       onTap: () {
-                        final players = _collectPlayers();
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              "Booking submitted for ${players.length} players",
-                            ),
-                          ),
-                        );
-                        Navigator.popUntil(context, (r) => r.isFirst);
+                        if (!_insideCampus) {
+                          showGlassAlert(
+                            context,
+                            "You must be inside IIT Ropar campus to use this feature",
+                          );
+                          return;
+                        }
+                        _submitBooking();
                       },
                     ),
                   ),
@@ -2781,10 +5572,16 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
                       color: const Color(0xFF81C784),
                       opacity: 0.25,
                       onTap: () {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text("Invitations sent successfully!"),
-                          ),
+                        if (!_insideCampus) {
+                          showGlassAlert(
+                            context,
+                            "You must be inside IIT Ropar campus to use this feature",
+                          );
+                          return;
+                        }
+                        showGlassAlert(
+                          context,
+                          "Invitations sent successfully!",
                         );
                       },
                     ),
