@@ -594,3 +594,81 @@ class BookingViewSet(viewsets.ModelViewSet):
                 {"error": "An error occurred while cancelling the booking"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+    
+    @action(detail=False, methods=["get"], url_path="booked-slots")
+    def booked_slots(self, request):
+        """
+        Get list of booked slot IDs for a given date and ground.
+        
+        Query Parameters:
+            - date (required): Date in YYYY-MM-DD format
+            - ground_id (required): Ground ID
+        
+        Returns:
+            200: {
+                "ground_id": int,
+                "date": str,
+                "booked_slot_ids": [list of slot IDs]
+            }
+            400: Validation error (missing or invalid parameters)
+        """
+        # Get and validate query parameters
+        date_str = request.query_params.get("date")
+        ground_id_str = request.query_params.get("ground_id")
+        
+        if not date_str:
+            return Response(
+                {"error": "Missing required parameter: date"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        if not ground_id_str:
+            return Response(
+                {"error": "Missing required parameter: ground_id"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        # Validate ground_id
+        try:
+            ground_id = int(ground_id_str)
+        except ValueError:
+            return Response(
+                {"error": "Invalid ground_id: must be an integer"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        # Validate date format
+        try:
+            from datetime import datetime
+            booking_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            return Response(
+                {"error": "Invalid date format. Use YYYY-MM-DD"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        # Check if ground exists
+        try:
+            ground = Ground.objects.get(ground_id=ground_id)
+        except Ground.DoesNotExist:
+            return Response(
+                {"error": f"Ground with ID {ground_id} does not exist"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        
+        # Query booked slots from Slot table
+        booked_slots = Slot.objects.filter(
+            ground=ground,
+            date=booking_date,
+            booked=True
+        ).values_list('slot_id', flat=True).order_by('slot_id')
+        
+        return Response(
+            {
+                "ground_id": ground_id,
+                "ground_name": ground.ground_name,
+                "date": date_str,
+                "booked_slot_ids": list(booked_slots),
+            },
+            status=status.HTTP_200_OK,
+        )
