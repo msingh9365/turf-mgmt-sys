@@ -142,6 +142,54 @@ class RedisClient:
         cls.set_slot_status(ground_id, date, slot_id, "available")
 
     @classmethod
+    def mark_slots_booked_batch(cls, ground_id: int, date: str, slot_ids: list[int], ttl: int = 86400) -> None:
+        """
+        Mark multiple slots as booked in Redis cache using pipeline (batch operation).
+        
+        Args:
+            ground_id: Ground identifier
+            date: Booking date (YYYY-MM-DD)
+            slot_ids: List of slot identifiers to mark as booked
+            ttl: Time to live in seconds (default: 24 hours)
+        """
+        if not slot_ids:
+            return
+        
+        client = cls.get_client()
+        pipe = client.pipeline()
+        
+        for slot_id in slot_ids:
+            slot_key = f"slot:{ground_id}:{date}:{slot_id}"
+            pipe.set(slot_key, "booked", ex=ttl)
+        
+        pipe.execute()
+        logger.debug(f"Batch marked {len(slot_ids)} slots as booked: {slot_ids}")
+
+    @classmethod
+    def mark_slots_available_batch(cls, ground_id: int, date: str, slot_ids: list[int], ttl: int = 86400) -> None:
+        """
+        Mark multiple slots as available in Redis cache using pipeline (batch operation).
+        
+        Args:
+            ground_id: Ground identifier
+            date: Booking date (YYYY-MM-DD)
+            slot_ids: List of slot identifiers to mark as available
+            ttl: Time to live in seconds (default: 24 hours)
+        """
+        if not slot_ids:
+            return
+        
+        client = cls.get_client()
+        pipe = client.pipeline()
+        
+        for slot_id in slot_ids:
+            slot_key = f"slot:{ground_id}:{date}:{slot_id}"
+            pipe.set(slot_key, "available", ex=ttl)
+        
+        pipe.execute()
+        logger.debug(f"Batch marked {len(slot_ids)} slots as available: {slot_ids}")
+
+    @classmethod
     def store_pending_booking(cls, unique_id: str, booking_data: dict, ttl: int = 300) -> None:
         """
         Store pending booking data temporarily.

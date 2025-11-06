@@ -105,6 +105,47 @@ class TestBookingCreation:
         details = Booked_Details.objects.filter(booking__booking_id=booking_id, player_email=test_user.email.lower())
         assert details.count() == 2
         assert set(details.values_list("slot_id", flat=True)) == {5, 6}
+    
+    def test_sort_key_case_insensitive_matching(self, authenticated_client, fake_redis_client, ground, db):
+        """Test that sort key matching is case-insensitive."""
+        tomorrow = (timezone.now() + timedelta(days=1)).date()
+        
+        # Create a user with mixed-case email
+        user_mixed_case = User.objects.create_user(
+            email="MixedCase@iitrpr.ac.in",
+            name="Mixed Case User",
+            sort_key="MIXEDCA",  # This will be stored in uppercase
+            password="testpass123",
+        )
+        
+        # Authenticate as different user
+        data = {
+            "ground_id": ground.ground_id,
+            "slot_id": [7],
+            "date": str(tomorrow),
+            "players": [
+                # Use lowercase email - should still match the user with uppercase sort_key
+                {"name": "Mixed Case Player", "email": "mixedcase@iitrpr.ac.in"},
+            ],
+        }
+        
+        response = authenticated_client.post("/api/bookings/", data, format="json")
+        
+        assert response.status_code == status.HTTP_200_OK
+        assert "players" in response.data
+        
+        # Should have 2 players: the one we specified + the authenticated creator
+        assert len(response.data["players"]) == 2
+        
+        # Find the mixed case player in response
+        mixed_player = next(
+            (p for p in response.data["players"] if "mixedcase" in p["email"].lower()),
+            None
+        )
+        assert mixed_player is not None
+        # Should be recognized as registered user despite case difference
+        assert mixed_player["is_user"] is True
+        assert mixed_player["sort_key"] == "MIXEDCA"
 
     def test_successful_booking_creation(self, authenticated_client, test_user, fake_redis_client, ground):
         """Test successful booking creation with valid data."""

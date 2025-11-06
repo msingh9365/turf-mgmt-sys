@@ -100,20 +100,28 @@ class BookingViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         
-        user_candidates = User.objects.filter(sort_key__in=player_sort_keys).values_list("sort_key", "email")
+        # Use Q objects for case-insensitive OR lookup across multiple sort keys
+        from django.db.models import Q
+        q_objects = Q()
+        for sk in player_sort_keys:
+            q_objects |= Q(sort_key__iexact=sk)
+        
+        user_candidates = User.objects.filter(q_objects).values_list("sort_key", "email")
         users_by_sort: dict[str, set[str]] = {}
         for sort_key, email in user_candidates:
             users_by_sort.setdefault(sort_key.upper(), set()).add(email.lower())
         
-        for payload, email, sort_key in zip(players_payload, player_emails, player_sort_keys):
+        for payload, email, original_sort_key in zip(players_payload, player_emails, player_sort_keys):
             name = payload["name"].strip()
-            candidate_emails = users_by_sort.get(sort_key.upper(), set())
+            # Use uppercase sort key for case-insensitive lookup
+            sort_key_upper = original_sort_key.upper()
+            candidate_emails = users_by_sort.get(sort_key_upper, set())
             is_registered = email in candidate_emails
             normalized_players.append(
                 {
                     "name": name,
                     "email": email,
-                    "sort_key": sort_key,
+                    "sort_key": sort_key_upper,  # Store uppercase for consistency
                     "is_user": is_registered,
                 }
             )
@@ -144,6 +152,9 @@ class BookingViewSet(viewsets.ModelViewSet):
         
         user = request.user
         
+        # Convert booking_date to string once (optimization: reuse throughout)
+        booking_date_str = str(booking_date)
+        
         # Track locks acquired and slots to create
         acquired_locks = []
         slots_to_book = []
@@ -154,7 +165,7 @@ class BookingViewSet(viewsets.ModelViewSet):
                 # Try to acquire Redis lock for this slot
                 lock_acquired = RedisClient.acquire_slot_lock(
                     ground_id=ground_id,
-                    date=str(booking_date),
+                    date=booking_date_str,
                     slot_id=slot_id,
                     user_id=user.id,
                     ttl=10,  # 10 seconds lock timeout
@@ -175,7 +186,7 @@ class BookingViewSet(viewsets.ModelViewSet):
                 # Check Redis cache for slot status
                 slot_status = RedisClient.get_slot_status(
                     ground_id=ground_id,
-                    date=str(booking_date),
+                    date=booking_date_str,
                     slot_id=slot_id,
                 )
                 
@@ -184,22 +195,27 @@ class BookingViewSet(viewsets.ModelViewSet):
                         f"Slot {slot_id} on {booking_date} already marked as booked in Redis"
                     )
                     raise SlotAlreadyBookedError(slot_id)
-
-                slot_conflict = Slot.objects.filter(
+            
+            # Batch check: Query all slots at once for conflicts (optimization: 1 query instead of N)
+            already_booked_slots = set(
+                Slot.objects.filter(
                     ground=ground,
                     date=booking_date,
-                    slot_id=slot_id,
+                    slot_id__in=slot_ids,
                     booked=True,
-                ).exists()
-
-                if slot_conflict:
-                    logger.warning(
-                        f"Slot {slot_id} on {booking_date} already marked as booked in DB"
-                    )
-                    RedisClient.mark_slot_booked(ground_id, str(booking_date), slot_id)
-                    raise SlotAlreadyBookedError(slot_id)
-                
-                slots_to_book.append(slot_id)
+                ).values_list('slot_id', flat=True)
+            )
+            
+            if already_booked_slots:
+                conflicting_slot = list(already_booked_slots)[0]
+                logger.warning(
+                    f"Slot {conflicting_slot} on {booking_date} already marked as booked in DB"
+                )
+                # Sync Redis cache for the conflicting slot
+                RedisClient.mark_slot_booked(ground_id, booking_date_str, conflicting_slot)
+                raise SlotAlreadyBookedError(conflicting_slot)
+            
+            slots_to_book = slot_ids
             
             # Phase 2: Create booking records - one row per slot, same booking_id
             with transaction.atomic():
@@ -243,22 +259,22 @@ class BookingViewSet(viewsets.ModelViewSet):
                 if details:
                     Booked_Details.objects.bulk_create(details)
 
+                # Bulk update: Mark all slots as booked (optimization: 1 query instead of N)
                 for slot_obj in locked_slots:
                     slot_obj.booked = True
-                    slot_obj.save(update_fields=["booked"])
+                Slot.objects.bulk_update(locked_slots, ['booked'])
 
                 logger.info(
                     f"Booking created: {booking_id} for user {user.id} "
                     f"with {len(slots_to_book)} slots: {slots_to_book}"
                 )
 
-            # Phase 3: Mark all slots as booked in Redis
-            for slot_id in slots_to_book:
-                RedisClient.mark_slot_booked(
-                    ground_id=ground_id,
-                    date=str(booking_date),
-                    slot_id=slot_id,
-                )
+            # Phase 3: Mark all slots as booked in Redis (batch operation: 1 pipeline instead of N round trips)
+            RedisClient.mark_slots_booked_batch(
+                ground_id=ground_id,
+                date=booking_date_str,
+                slot_ids=slots_to_book,
+            )
 
             response_payload = {
                 "booking_id": booking_id,
@@ -291,7 +307,7 @@ class BookingViewSet(viewsets.ModelViewSet):
             for slot_id in acquired_locks:
                 RedisClient.release_slot_lock(
                     ground_id=ground_id,
-                    date=str(booking_date),
+                    date=booking_date_str,
                     slot_id=slot_id,
                 )
     
@@ -367,6 +383,9 @@ class BookingViewSet(viewsets.ModelViewSet):
                 booking.status = Booking.STATUS_REJECTED
                 booking.save(update_fields=["status"])
 
+                # Collect slot objects and mark as available (batch optimization)
+                slots_to_update = []
+                redis_batch_data = []
                 for detail in details:
                     slots_cancelled.add(detail.slot_id)
                     slot_obj = (
@@ -380,20 +399,27 @@ class BookingViewSet(viewsets.ModelViewSet):
                     )
                     if slot_obj:
                         slot_obj.booked = False
-                        slot_obj.save(update_fields=["booked"])
+                        slots_to_update.append(slot_obj)
+                    redis_batch_data.append((detail.ground.ground_id, str(detail.date), detail.slot_id))
+                
+                # Bulk update all slots in one query
+                if slots_to_update:
+                    Slot.objects.bulk_update(slots_to_update, ['booked'])
                 
                 logger.info(
                     f"Booking cancelled via cancel endpoint: {booking_id} by user {request.user.id} "
                     f"({len(slots_cancelled)} slots: {sorted(slots_cancelled)})"
                 )
             
-            # Mark all slots as available in Redis
-            for detail in details:
-                RedisClient.mark_slot_available(
-                    ground_id=detail.ground.ground_id,
-                    date=str(detail.date),
-                    slot_id=detail.slot_id,
-                )
+            # Mark all slots as available in Redis (batch operation)
+            if details:
+                # Group by ground and date for efficient batching
+                first_detail = details[0]
+                ground_id = first_detail.ground.ground_id
+                date_str = str(first_detail.date)
+                slot_ids = [detail.slot_id for detail in details]
+                RedisClient.mark_slots_available_batch(ground_id, date_str, slot_ids)
+
             
             return Response(
                 {
@@ -472,6 +498,8 @@ class BookingViewSet(viewsets.ModelViewSet):
                 booking.status = Booking.STATUS_REJECTED
                 booking.save(update_fields=["status"])
 
+                # Collect slot objects and mark as available (batch optimization)
+                slots_to_update = []
                 for detail in details:
                     slots_cancelled.add(detail.slot_id)
                     slot_obj = (
@@ -485,20 +513,26 @@ class BookingViewSet(viewsets.ModelViewSet):
                     )
                     if slot_obj:
                         slot_obj.booked = False
-                        slot_obj.save(update_fields=["booked"])
+                        slots_to_update.append(slot_obj)
+                
+                # Bulk update all slots in one query
+                if slots_to_update:
+                    Slot.objects.bulk_update(slots_to_update, ['booked'])
                 
                 logger.info(
                     f"Booking cancelled: {booking_id} by user {request.user.id} "
                     f"({len(slots_cancelled)} slots: {sorted(slots_cancelled)})"
                 )
             
-            # Mark all slots as available in Redis
-            for detail in details:
-                RedisClient.mark_slot_available(
-                    ground_id=detail.ground.ground_id,
-                    date=str(detail.date),
-                    slot_id=detail.slot_id,
-                )
+            # Mark all slots as available in Redis (batch operation)
+            if details:
+                # Group by ground and date for efficient batching
+                first_detail = details[0]
+                ground_id = first_detail.ground.ground_id
+                date_str = str(first_detail.date)
+                slot_ids = [detail.slot_id for detail in details]
+                RedisClient.mark_slots_available_batch(ground_id, date_str, slot_ids)
+
             
             return Response(
                 {
