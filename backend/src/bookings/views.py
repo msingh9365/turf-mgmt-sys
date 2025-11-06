@@ -87,7 +87,7 @@ class BookingViewSet(viewsets.ModelViewSet):
         ground_id = data["ground_id"]
         slot_ids = data["slot_id"]  # This is a list now
         booking_date = data["date"]
-        metadata = data.get("metadata", {})
+    # metadata field removed from model; all derived info comes from related Booked_Details
         players_payload = data["players"]
         player_emails = [player["email"].lower() for player in players_payload]
         player_sort_keys = [_derive_sort_key(email) for email in player_emails]
@@ -180,12 +180,7 @@ class BookingViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_409_CONFLICT,
                 )
         
-        metadata = {**metadata}
-        metadata.setdefault("ground_id", ground.ground_id)
-        metadata.setdefault("ground_name", ground.ground_name)
-        # Ensure players in metadata reflect normalized players (including creator)
-        metadata["players"] = normalized_players
-        metadata.setdefault("slots", slot_ids)
+    # metadata removed: ground/players/slots information will be derived from Booked_Details
         
         # Generate a single Booking_ID that will be shared by all slots
         booking_id = Booking.generate_booking_id()
@@ -278,7 +273,6 @@ class BookingViewSet(viewsets.ModelViewSet):
                     booking_id=booking_id,
                     user=user,
                     date=booking_date,
-                    metadata=metadata,
                     status=Booking.STATUS_DONE,
                 )
 

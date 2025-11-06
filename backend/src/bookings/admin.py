@@ -19,8 +19,8 @@ class BookingAdmin(admin.ModelAdmin):
         ("Booking Information", {
             "fields": ("booking_id", "user", "date")
         }),
-        ("Status & Metadata", {
-            "fields": ("status", "metadata")
+        ("Status", {
+            "fields": ("status",)
         }),
         ("Timestamps", {
             "fields": ("created_at",)

@@ -42,9 +42,14 @@ env = environ.Env(
 ENV_FILE = BASE_DIR / ".env"
 LOCAL_ENV_FILE = BASE_DIR / ".env.local"
 
+# Load .env first, then allow .env.local to override it (use overwrite=True for .env.local)
 for env_path in (ENV_FILE, LOCAL_ENV_FILE):
     if env_path.exists():
-        environ.Env.read_env(str(env_path))
+        if env_path == LOCAL_ENV_FILE:
+            # Let .env.local override values from .env (and any previously set ones)
+            environ.Env.read_env(str(env_path), overwrite=True)
+        else:
+            environ.Env.read_env(str(env_path))
 
 DEBUG = env.bool("DEBUG")
 SECRET_KEY = env("DJANGO_SECRET_KEY") or "unsafe-dev-key-change-me"

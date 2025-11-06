@@ -215,12 +215,6 @@ class Booking(models.Model):
         db_column="Date",
     )
     
-    # Metadata stored as JSON
-    metadata = models.JSONField(
-        default=dict,
-        blank=True,
-        db_column="Metadata",
-    )
     
     # Booking status
     status = models.CharField(
@@ -268,7 +262,11 @@ class Booking(models.Model):
         return f"BK{date_str}{random_hex.upper()}"
     
     def __str__(self):
-        ground_display = self.metadata.get("ground_name") or self.metadata.get("ground_id") or "Unknown ground"
+        # Derive ground name from first booked detail if available (metadata column removed)
+        detail = self.booked_details.first()
+        ground_display = (
+            f"{detail.ground.ground_name}" if detail and detail.ground else "Unknown ground"
+        )
         return f"Booking {self.booking_id} - {self.user.email} - {ground_display} - Date {self.date}"
     
     @property

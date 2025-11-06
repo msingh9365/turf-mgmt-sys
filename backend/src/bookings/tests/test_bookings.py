@@ -15,7 +15,7 @@ from core.redis_client import RedisClient
 User = get_user_model()
 
 
-def _api_create_booking(client, ground, slot_ids, date, players, metadata=None):
+def _api_create_booking(client, ground, slot_ids, date, players):
     """Helper to create a booking via API and return response payload."""
     payload = {
         "ground_id": ground.ground_id,
@@ -23,8 +23,6 @@ def _api_create_booking(client, ground, slot_ids, date, players, metadata=None):
         "date": str(date),
         "players": players,
     }
-    if metadata is not None:
-        payload["metadata"] = metadata
 
     response = client.post("/api/bookings/", payload, format="json")
     assert response.status_code == status.HTTP_200_OK
@@ -85,7 +83,7 @@ class TestBookingCreation:
                 {"name": "Guest One", "email": "guest1@example.com"},
                 {"name": "Guest Two", "email": "guest2@example.com"},
             ],
-            "metadata": {"note": "team booking"},
+            # metadata removed
         }
 
         response = authenticated_client.post("/api/bookings/", data, format="json")
@@ -159,7 +157,6 @@ class TestBookingCreation:
                 {"name": "Test User", "email": test_user.email},
                 {"name": "Guest Player", "email": "guest1@example.com"},
             ],
-            "metadata": {"team_name": "Test Team"},
         }
         
         response = authenticated_client.post("/api/bookings/", data, format="json")
@@ -178,11 +175,7 @@ class TestBookingCreation:
         booking = Booking.objects.get(booking_id=response.data["booking_id"])
         assert booking.user == test_user
         assert booking.status == Booking.STATUS_DONE
-        assert booking.metadata["team_name"] == "Test Team"
-        assert booking.metadata["slots"] == [5]
-        assert len(booking.metadata["players"]) == 2
-        assert booking.metadata["ground_id"] == ground.ground_id
-        assert booking.metadata["ground_name"] == ground.ground_name
+        # metadata column removed; verify via details instead
 
         details = Booked_Details.objects.filter(booking=booking)
         assert details.count() == 2  # 2 players x 1 slot
@@ -213,7 +206,6 @@ class TestBookingCreation:
                 {"name": "Guest Player", "email": "guest2@example.com"},
                 {"name": "Guest Player 2", "email": "guest3@example.com"},
             ],
-            "metadata": {"team_name": "Hostel 5 FC", "notes": "Final match"},
         }
         
         response = authenticated_client.post("/api/bookings/", data, format="json")
@@ -227,10 +219,6 @@ class TestBookingCreation:
         
         # Verify booking exists and details captured
         booking = Booking.objects.get(booking_id=response.data["booking_id"])
-        assert booking.metadata["slots"] == [3, 4, 5]
-        assert len(booking.metadata["players"]) == 3
-        assert booking.metadata["ground_id"] == secondary_ground.ground_id
-        assert booking.metadata["ground_name"] == secondary_ground.ground_name
 
         details = Booked_Details.objects.filter(booking=booking)
         assert details.count() == 9  # 3 slots * 3 players
@@ -732,12 +720,6 @@ class TestBookingCancellation:
             user=test_user,
             date=yesterday,
             status=Booking.STATUS_DONE,
-            metadata={
-                "slots": [5],
-                "players": [{"name": "Test User", "email": test_user.email}],
-                "ground_id": ground.ground_id,
-                "ground_name": ground.ground_name,
-            },
         )
         Slot.objects.create(ground=ground, date=yesterday, slot_id=5, booked=True)
         Booked_Details.objects.create(
@@ -764,12 +746,6 @@ class TestBookingCancellation:
             user=test_user,
             date=tomorrow,
             status=Booking.STATUS_REJECTED,
-            metadata={
-                "slots": [5],
-                "players": [{"name": "Test User", "email": test_user.email}],
-                "ground_id": ground.ground_id,
-                "ground_name": ground.ground_name,
-            },
         )
         Slot.objects.create(ground=ground, date=tomorrow, slot_id=5, booked=False)
         Booked_Details.objects.create(
@@ -898,12 +874,6 @@ class TestCancelEndpoint:
             user=test_user,
             date=yesterday,
             status=Booking.STATUS_DONE,
-            metadata={
-                "slots": [5],
-                "players": [{"name": "Test User", "email": test_user.email}],
-                "ground_id": ground.ground_id,
-                "ground_name": ground.ground_name,
-            },
         )
         Slot.objects.create(ground=ground, date=yesterday, slot_id=5, booked=True)
         Booked_Details.objects.create(
@@ -930,12 +900,6 @@ class TestCancelEndpoint:
             user=test_user,
             date=tomorrow,
             status=Booking.STATUS_REJECTED,
-            metadata={
-                "slots": [5],
-                "players": [{"name": "Test User", "email": test_user.email}],
-                "ground_id": ground.ground_id,
-                "ground_name": ground.ground_name,
-            },
         )
         Slot.objects.create(ground=ground, date=tomorrow, slot_id=5, booked=False)
         Booked_Details.objects.create(
@@ -969,12 +933,6 @@ class TestCancelEndpoint:
             user=test_user,
             date=tomorrow,
             status=Booking.STATUS_WAITLIST,
-            metadata={
-                "slots": [5],
-                "players": [{"name": "Test User", "email": test_user.email}],
-                "ground_id": ground.ground_id,
-                "ground_name": ground.ground_name,
-            },
         )
         Slot.objects.create(ground=ground, date=tomorrow, slot_id=5, booked=False)
         Booked_Details.objects.create(

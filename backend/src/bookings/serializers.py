@@ -59,7 +59,6 @@ class BookingSerializer(serializers.ModelSerializer):
             "booking_id",
             "date",
             "status",
-            "metadata",
             "created_at",
             "user_email",
             "user_name",
@@ -83,16 +82,10 @@ class BookingSerializer(serializers.ModelSerializer):
         ]
 
     def get_ground_id(self, obj):
-        metadata_ground = obj.metadata.get("ground_id") if isinstance(obj.metadata, dict) else None
-        if metadata_ground is not None:
-            return metadata_ground
         detail = obj.booked_details.first()
         return detail.ground.ground_id if detail and detail.ground else None
 
     def get_ground_name(self, obj):
-        metadata_ground = obj.metadata.get("ground_name") if isinstance(obj.metadata, dict) else None
-        if metadata_ground:
-            return metadata_ground
         detail = obj.booked_details.first()
         return detail.ground.ground_name if detail and detail.ground else None
 
@@ -131,7 +124,6 @@ class BookingCreateSerializer(serializers.Serializer):
     )
     date = serializers.DateField()
     players = BookingPlayerSerializer(many=True)
-    metadata = serializers.JSONField(required=False, default=dict)
     
     def validate_date(self, value):
         """
@@ -180,10 +172,7 @@ class BookingCreateSerializer(serializers.Serializer):
     def validate(self, attrs):
         """
         Cross-field validation.
-        Combine player_ids into metadata if provided.
         """
-        metadata = attrs.get("metadata", {})
-        attrs["metadata"] = metadata or {}
         players = attrs.get("players", [])
 
         if not players:
