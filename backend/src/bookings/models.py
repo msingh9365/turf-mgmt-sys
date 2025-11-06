@@ -154,6 +154,14 @@ class Booked_Details(models.Model):
         db_table = "Booked_Details"
         verbose_name = "Booked Detail"
         verbose_name_plural = "Booked Details"
+        
+        # Composite indexes for efficient queries
+        indexes = [
+            # Index for member lock system: check if registered user has booking on ground/date
+            models.Index(fields=["ground", "date", "is_user"], name="idx_member_lock"),
+            # Index for player email lookups
+            models.Index(fields=["player_email", "is_user"], name="idx_player_lookup"),
+        ]
     
     def __str__(self):
         return f"Booked Detail - {self.booking.booking_id} - {self.player_email}"

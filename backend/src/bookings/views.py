@@ -140,6 +140,46 @@ class BookingViewSet(viewsets.ModelViewSet):
                 }
             )
         
+        # Member Lock System: Check if any registered user already has a booking on this ground/date
+        registered_player_emails = [p["email"] for p in normalized_players if p["is_user"]]
+        
+        if registered_player_emails:
+            # Check for existing active bookings for these members on the same ground and date
+            # Optimized query: uses composite index (ground, date, is_user) and only fetches needed fields
+            conflicting_booking = (
+                Booked_Details.objects
+                .filter(
+                    ground=ground,
+                    date=booking_date,
+                    is_user=True,  # Filter early for index usage
+                    player_email__in=registered_player_emails,
+                )
+                .filter(booking__status=Booking.STATUS_DONE)  # Separate filter for better query plan
+                .values('player_email', 'player_name', 'booking_id')  # Only fetch needed fields
+                .first()  # Stop at first conflict (more efficient than distinct())
+            )
+            
+            if conflicting_booking:
+                conflicting_player_email = conflicting_booking['player_email']
+                conflicting_player_name = conflicting_booking['player_name']
+                conflicting_booking_id = conflicting_booking['booking_id']
+                
+                logger.warning(
+                    f"Member lock violation: {conflicting_player_email} already has booking "
+                    f"{conflicting_booking_id} on {ground.ground_name} for {booking_date}"
+                )
+                return Response(
+                    {
+                        "error": "Member lock violation",
+                        "message": f"Player '{conflicting_player_name}' ({conflicting_player_email}) "
+                                   f"already has an active booking on this ground for {booking_date}. "
+                                   f"Booking ID: {conflicting_booking_id}",
+                        "conflicting_player": conflicting_player_email,
+                        "existing_booking_id": conflicting_booking_id,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+        
         metadata = {**metadata}
         metadata.setdefault("ground_id", ground.ground_id)
         metadata.setdefault("ground_name", ground.ground_name)

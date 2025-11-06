@@ -301,7 +301,9 @@ class TestBookingCreation:
         response = authenticated_client.post("/api/bookings/", data, format="json")
         
         assert response.status_code == status.HTTP_409_CONFLICT
-        assert "already booked" in response.data["error"].lower()
+        # Member lock catches this first, but slot-level check would also catch it
+        error_msg = response.data["error"].lower()
+        assert "already booked" in error_msg or "member lock" in error_msg
     
     def test_lock_conflict_returns_409(self, authenticated_client, test_user, fake_redis_client, ground):
         """Test that concurrent booking attempt returns 409 when lock is held."""
@@ -337,6 +339,263 @@ class TestBookingCreation:
         response = api_client.post("/api/bookings/", data, format="json")
         
         assert response.status_code in [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN]
+
+
+@pytest.mark.django_db
+class TestMemberLockSystem:
+    """Tests for member lock system - preventing duplicate bookings for registered users."""
+    
+    def test_member_lock_prevents_duplicate_booking_same_ground_same_date(
+        self, authenticated_client, test_user, another_user, fake_redis_client, ground
+    ):
+        """Test that a registered user cannot book the same ground on the same date twice."""
+        tomorrow = (timezone.now() + timedelta(days=1)).date()
+        
+        # Create first booking for test_user
+        first_booking = _api_create_booking(
+            authenticated_client,
+            ground,
+            [5, 6],
+            tomorrow,
+            [{"name": "Test User", "email": test_user.email}],
+        )
+        
+        assert first_booking["booking_id"]
+        
+        # Try to create second booking with test_user in players list (different slots)
+        data = {
+            "ground_id": ground.ground_id,
+            "slot_id": [7, 8],  # Different slots
+            "date": str(tomorrow),  # Same date
+            "players": [
+                {"name": "Test User", "email": test_user.email},  # Same user
+                {"name": "Guest", "email": "guest@example.com"},
+            ],
+        }
+        
+        response = authenticated_client.post("/api/bookings/", data, format="json")
+        
+        assert response.status_code == status.HTTP_409_CONFLICT
+        assert "Member lock violation" in response.data["error"]
+        assert test_user.email.lower() in response.data["message"].lower()
+        assert first_booking["booking_id"] == response.data["existing_booking_id"]
+    
+    def test_member_lock_prevents_duplicate_with_another_user_in_players(
+        self, authenticated_client, test_user, another_user, fake_redis_client, ground
+    ):
+        """Test that member lock blocks if ANY registered player has existing booking."""
+        tomorrow = (timezone.now() + timedelta(days=1)).date()
+        
+        # Create first booking with another_user
+        booking_payload = {
+            "ground_id": ground.ground_id,
+            "slot_id": [10, 11],
+            "date": str(tomorrow),
+            "players": [{"name": another_user.name, "email": another_user.email}],
+        }
+        
+        # Create booking as test_user (creator auto-added)
+        response1 = authenticated_client.post("/api/bookings/", booking_payload, format="json")
+        assert response1.status_code == status.HTTP_200_OK
+        first_booking_id = response1.data["booking_id"]
+        
+        # Now try to book again including another_user in players
+        data = {
+            "ground_id": ground.ground_id,
+            "slot_id": [12, 13],  # Different slots
+            "date": str(tomorrow),  # Same date
+            "players": [
+                {"name": another_user.name, "email": another_user.email},  # Has existing booking
+                {"name": "New Guest", "email": "newguest@example.com"},
+            ],
+        }
+        
+        response = authenticated_client.post("/api/bookings/", data, format="json")
+        
+        assert response.status_code == status.HTTP_409_CONFLICT
+        assert "Member lock violation" in response.data["error"]
+        assert another_user.email.lower() in response.data["conflicting_player"].lower()
+        assert first_booking_id == response.data["existing_booking_id"]
+    
+    def test_member_lock_allows_different_ground_same_date(
+        self, authenticated_client, test_user, fake_redis_client, ground, sport
+    ):
+        """Test that member can book different ground on same date."""
+        tomorrow = (timezone.now() + timedelta(days=1)).date()
+        
+        # Create another ground
+        ground2 = Ground.objects.create(
+            ground_name="Ground 2",
+            sport=sport,
+        )
+        
+        # Create first booking on ground 1
+        _api_create_booking(
+            authenticated_client,
+            ground,
+            [5],
+            tomorrow,
+            [{"name": "Test User", "email": test_user.email}],
+        )
+        
+        # Try to book ground 2 on same date - should succeed
+        data = {
+            "ground_id": ground2.ground_id,
+            "slot_id": [5],
+            "date": str(tomorrow),
+            "players": [{"name": "Test User", "email": test_user.email}],
+        }
+        
+        response = authenticated_client.post("/api/bookings/", data, format="json")
+        
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["booking_id"]
+    
+    def test_member_lock_allows_same_ground_different_date(
+        self, authenticated_client, test_user, fake_redis_client, ground
+    ):
+        """Test that member can book same ground on different date."""
+        tomorrow = (timezone.now() + timedelta(days=1)).date()
+        day_after = (timezone.now() + timedelta(days=2)).date()
+        
+        # Create first booking for tomorrow
+        _api_create_booking(
+            authenticated_client,
+            ground,
+            [5],
+            tomorrow,
+            [{"name": "Test User", "email": test_user.email}],
+        )
+        
+        # Try to book same ground for day after - should succeed
+        data = {
+            "ground_id": ground.ground_id,
+            "slot_id": [5],
+            "date": str(day_after),
+            "players": [{"name": "Test User", "email": test_user.email}],
+        }
+        
+        response = authenticated_client.post("/api/bookings/", data, format="json")
+        
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["booking_id"]
+    
+    def test_member_lock_ignores_non_registered_players(
+        self, api_client, fake_redis_client, ground
+    ):
+        """Test that member lock only applies to registered users, not guests."""
+        tomorrow = (timezone.now() + timedelta(days=1)).date()
+        
+        # Create a non-registered user for authentication
+        guest_user = User.objects.create_user(
+            email="guestuser@example.com",
+            name="Guest User",
+            sort_key="GUESTUS",
+            password="testpass123",
+        )
+        api_client.force_authenticate(user=guest_user)
+        
+        # Create first booking with a non-registered guest email
+        booking_payload = {
+            "ground_id": ground.ground_id,
+            "slot_id": [5],
+            "date": str(tomorrow),
+            "players": [{"name": "Non Registered Guest", "email": "nonreg@example.com"}],
+        }
+        response1 = api_client.post("/api/bookings/", booking_payload, format="json")
+        assert response1.status_code == status.HTTP_200_OK
+        
+        # Authenticate as different user
+        another_guest_user = User.objects.create_user(
+            email="another_guest@example.com",
+            name="Another Guest User",
+            sort_key="ANOTHER",
+            password="testpass123",
+        )
+        api_client.force_authenticate(user=another_guest_user)
+        
+        # Try to book with the same non-registered guest email
+        # This should succeed because the guest is not a registered user and member lock doesn't apply
+        data = {
+            "ground_id": ground.ground_id,
+            "slot_id": [6],
+            "date": str(tomorrow),
+            "players": [{"name": "Non Registered Guest", "email": "nonreg@example.com"}],
+        }
+        
+        response = api_client.post("/api/bookings/", data, format="json")
+        
+        # Should succeed because non-registered guests are not subject to member lock
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["booking_id"]
+    
+    def test_member_lock_ignores_cancelled_bookings(
+        self, authenticated_client, test_user, fake_redis_client, ground
+    ):
+        """Test that member lock ignores cancelled/rejected bookings."""
+        tomorrow = (timezone.now() + timedelta(days=1)).date()
+        
+        # Create and then cancel a booking
+        first_booking = _api_create_booking(
+            authenticated_client,
+            ground,
+            [5],
+            tomorrow,
+            [{"name": "Test User", "email": test_user.email}],
+        )
+        
+        booking_id = first_booking["booking_id"]
+        
+        # Cancel the booking
+        cancel_response = authenticated_client.post(
+            f"/api/bookings/{booking_id}/cancel/",
+            format="json",
+        )
+        assert cancel_response.status_code == status.HTTP_200_OK
+        
+        # Now try to book again - should succeed because first booking is cancelled
+        data = {
+            "ground_id": ground.ground_id,
+            "slot_id": [6],
+            "date": str(tomorrow),
+            "players": [{"name": "Test User", "email": test_user.email}],
+        }
+        
+        response = authenticated_client.post("/api/bookings/", data, format="json")
+        
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["booking_id"]
+        assert response.data["booking_id"] != booking_id  # Different booking
+    
+    def test_member_lock_checks_creator_auto_inclusion(
+        self, authenticated_client, test_user, fake_redis_client, ground
+    ):
+        """Test that member lock also checks the creator who is auto-included."""
+        tomorrow = (timezone.now() + timedelta(days=1)).date()
+        
+        # Create first booking (creator auto-included)
+        first_booking = _api_create_booking(
+            authenticated_client,
+            ground,
+            [5],
+            tomorrow,
+            [{"name": "Guest", "email": "guest@example.com"}],  # Only guest in payload
+        )
+        
+        # Try to create another booking without creator in payload
+        # Creator will be auto-included and should trigger member lock
+        data = {
+            "ground_id": ground.ground_id,
+            "slot_id": [6],
+            "date": str(tomorrow),
+            "players": [{"name": "Another Guest", "email": "another@example.com"}],
+        }
+        
+        response = authenticated_client.post("/api/bookings/", data, format="json")
+        
+        # Should fail because creator (test_user) is auto-included and already has booking
+        assert response.status_code == status.HTTP_409_CONFLICT
+        assert "Member lock violation" in response.data["error"]
 
 
 @pytest.mark.django_db
