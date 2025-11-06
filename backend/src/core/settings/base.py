@@ -8,6 +8,7 @@ This file is imported by environment-specific settings (dev/prod).
 from __future__ import annotations
 
 from datetime import timedelta
+import os
 from pathlib import Path
 
 import environ
@@ -207,12 +208,29 @@ REDIS_PORT = env("REDIS_PORT")
 REDIS_PASSWORD = env("REDIS_PASSWORD")
 REDIS_DB = env("REDIS_DB")
 
-# Cache configuration using Redis
-CACHES = {
-    "default": {
-        "BACKEND": "django.core.cache.backends.redis.RedisCache",
-        "LOCATION": f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}" if REDIS_PASSWORD else f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}",
-        "KEY_PREFIX": "turf_mgmt",
-        "TIMEOUT": 300,  # Default cache timeout (5 minutes)
+# Cache configuration
+# Use Redis in production by default. In local dev/tests, prefer LocMem unless explicitly enabled.
+RUNNING_TESTS = "PYTEST_CURRENT_TEST" in os.environ
+USE_REDIS_CACHE = env.bool("USE_REDIS_CACHE", default=not DEBUG and not RUNNING_TESTS)
+
+if USE_REDIS_CACHE:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": (
+                f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+                if REDIS_PASSWORD
+                else f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+            ),
+            "KEY_PREFIX": "turf_mgmt",
+            "TIMEOUT": 300,
+        }
     }
-}
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "turf_mgmt_locmem",
+            "TIMEOUT": 300,
+        }
+    }

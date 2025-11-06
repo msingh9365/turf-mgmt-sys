@@ -15,6 +15,7 @@ from django.http import Http404
 from .models import Booking, Booked_Details, Slot, Ground
 from .serializers import (
     BookingSerializer,
+    BookingSummarySerializer,
     BookingCreateSerializer,
     BookingCancelSerializer,
     BookingResponseSerializer,
@@ -351,10 +352,10 @@ class BookingViewSet(viewsets.ModelViewSet):
         Get all bookings for the authenticated user.
         
         Returns:
-            List of bookings with details
+            List of bookings in summary format required by client
         """
         queryset = self.get_queryset().order_by("-created_at")
-        serializer = BookingSerializer(queryset, many=True)
+        serializer = BookingSummarySerializer(queryset, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
     
     @action(detail=True, methods=["post"], url_path="cancel")

@@ -32,20 +32,21 @@ class RedisClient:
                 redis_password = getattr(settings, "REDIS_PASSWORD", "")
                 redis_db = getattr(settings, "REDIS_DB", 0)
 
-                cls._instance = redis.Redis(
+                client = redis.Redis(
                     host=redis_host,
                     port=redis_port,
                     password=redis_password if redis_password else None,
                     db=redis_db,
-                    decode_responses=False,  # We'll handle decoding manually
+                    decode_responses=False,
                     socket_connect_timeout=5,
                     socket_timeout=5,
                 )
-                # Test connection
-                cls._instance.ping()
+                client.ping()
+                cls._instance = client
                 logger.info(f"Redis connected successfully at {redis_host}:{redis_port}")
-            except redis.ConnectionError as e:
-                logger.error(f"Failed to connect to Redis: {e}")
+            except Exception as e:  # broaden to catch DNS errors etc.
+                logger.error(f"Failed to connect to Redis ({type(e).__name__}): {e}")
+                # No fallback in production code; tests should patch this
                 raise
 
         return cls._instance

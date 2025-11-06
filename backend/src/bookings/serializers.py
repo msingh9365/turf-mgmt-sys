@@ -109,6 +109,51 @@ class BookingSerializer(serializers.ModelSerializer):
         return list(players.values())
 
 
+class BookingSummarySerializer(serializers.ModelSerializer):
+    """Compact summary for listing a user's bookings in a specific format."""
+
+    slots = serializers.SerializerMethodField()
+    ground_id = serializers.SerializerMethodField()
+    players = serializers.SerializerMethodField()
+    num_slots = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Booking
+        fields = [
+            "booking_id",  # 1. Booking Id
+            "slots",       # 2. List of slot Id's
+            "ground_id",   # 3. Ground Id
+            "players",     # 4. Players in the booking
+            "num_slots",   # 5. No. of slots
+            "created_at",  # 6. Created At
+        ]
+        read_only_fields = fields
+
+    def get_slots(self, obj: Booking):
+        slot_ids = {detail.slot_id for detail in obj.booked_details.all()}
+        return sorted(slot_ids)
+
+    def get_ground_id(self, obj: Booking):
+        detail = obj.booked_details.first()
+        return detail.ground.ground_id if detail and detail.ground else None
+
+    def get_players(self, obj: Booking):
+        players = {}
+        for detail in obj.booked_details.all():
+            email_key = detail.player_email.lower()
+            if email_key not in players:
+                players[email_key] = {
+                    "name": detail.player_name,
+                    "email": detail.player_email,
+                    "sort_key": detail.sort_key,
+                    "is_user": detail.is_user,
+                }
+        return list(players.values())
+
+    def get_num_slots(self, obj: Booking):
+        return len(self.get_slots(obj))
+
+
 class BookingCreateSerializer(serializers.Serializer):
     """
     Serializer for creating a new booking.
