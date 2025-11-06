@@ -4,4 +4,4 @@ __pycache__/
 *$py.class
 
 .DS_Store
-backend/src/db.sqlite3
+db.sqlite3
