@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 
 List<Map<String, String>> globalNotifications = [];
 
@@ -48,15 +49,8 @@ final List<Map<String, dynamic>> globalBookings = [
     ],
   },
 ];
-void main() {
-  SystemChrome.setSystemUIOverlayStyle(
-    const SystemUiOverlayStyle(
-      statusBarColor: Colors.black, // Background color of status bar
-      statusBarIconBrightness:
-          Brightness.light, // Icons (battery, time) in white
-      statusBarBrightness: Brightness.dark, // For iOS devices
-    ),
-  );
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
   runApp(const MyApp());
 }
 
@@ -67,7 +61,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      home: const IntroScreen(),
+      home: const IntroScreen(), // Always show intro first
     );
   }
 }
@@ -110,14 +104,24 @@ class _IntroScreenState extends State<IntroScreen> {
   }
 
   void _goToHome() async {
-    final valid = await _authService.isTokenValid();
+    final prefs = await SharedPreferences.getInstance();
+    final refreshToken = prefs.getString("refresh_token");
+
+    Widget nextScreen = const LoginPage();
+
+    if (refreshToken != null) {
+      final newToken = await AuthService().refreshAccessToken();
+      if (newToken != null) {
+        nextScreen = const HomePage();
+      }
+    }
 
     if (!mounted) return;
 
-    Navigator.of(context).pushReplacement(
+    Navigator.pushReplacement(
+      context,
       PageRouteBuilder(
-        //pageBuilder: (_, __, ___) => const LoginPage(),
-        pageBuilder: (_, __, ___) => const HomePage(),
+        pageBuilder: (_, __, ___) => nextScreen,
         transitionsBuilder: (_, anim, __, child) =>
             FadeTransition(opacity: anim, child: child),
         transitionDuration: const Duration(milliseconds: 700),
@@ -272,6 +276,69 @@ class AuthService {
     final exp = payload["exp"] * 1000;
     return DateTime.now().millisecondsSinceEpoch < exp;
   }
+
+  Future<String?> refreshAccessToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    final refreshToken = prefs.getString("refresh_token");
+
+    if (refreshToken == null) return null;
+
+    final uri = Uri.parse(
+      "https://turf-mgmt-sys.onrender.com/api/auth/token/refresh/",
+    );
+    final res = await http.post(
+      uri,
+      headers: {"Content-Type": "application/json"},
+      body: jsonEncode({"refresh": refreshToken}),
+    );
+
+    if (res.statusCode == 200) {
+      final newToken = jsonDecode(res.body)["access"];
+      await prefs.setString("access_token", newToken);
+      return newToken;
+    }
+
+    // ✅ Refresh failed → logout automatically
+    await prefs.clear();
+    return null;
+  }
+
+  Future<http.Response> authGet(Uri url) async {
+    final prefs = await SharedPreferences.getInstance();
+    String? accessToken = prefs.getString("access_token");
+
+    if (!await isTokenValid()) {
+      accessToken = await refreshAccessToken();
+      if (accessToken == null) {
+        await prefs.clear();
+        throw Exception("Session expired. Please login again.");
+      }
+    }
+
+    return http.get(url, headers: {"Authorization": "Bearer $accessToken"});
+  }
+
+  Future<http.Response> authPost(Uri url, Map data) async {
+    final prefs = await SharedPreferences.getInstance();
+    String? accessToken = prefs.getString("access_token");
+
+    if (!await isTokenValid()) {
+      accessToken = await refreshAccessToken();
+      if (accessToken == null) {
+        await prefs.clear();
+        throw Exception("Session expired. Please login again.");
+      }
+    }
+
+    return http.post(
+      url,
+      headers: {
+        "Authorization": "Bearer $accessToken",
+        "Content-Type": "application/json",
+      },
+      body: jsonEncode(data),
+    );
+  }
 }
 
 final _authService = AuthService();
@@ -366,6 +433,53 @@ Widget glassActionButton({
       ),
     ),
   );
+}
+
+class GoogleAuthService {
+  static final GoogleSignIn _googleSignIn = GoogleSignIn(
+    scopes: ['email', 'profile'], // ensures name/email/image come in token
+    serverClientId:
+        '806464575327-0sej44tk5f6ur3r4uiu1b1a8ht43eudv.apps.googleusercontent.com',
+  );
+
+  static Future<bool> signInWithGoogle() async {
+    try {
+      final googleUser = await _googleSignIn.signIn();
+      if (googleUser == null) return false;
+
+      final googleAuth = await googleUser.authentication;
+      final idToken = googleAuth.idToken;
+      if (idToken == null) return false;
+
+      print("ID TOKEN = $idToken\n"); // This is the token backend needs
+
+      // Send exact backend required JSON format
+      final response = await http.post(
+        Uri.parse(
+          "https://turf-mgmt-sys.onrender.com/api/auth/google/android/",
+        ),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({"id_token": idToken}),
+      );
+
+      print("Google Login Response: ${response.statusCode} - ${response.body}");
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString("access_token", data["access"]);
+        await prefs.setString("refresh_token", data["refresh"]);
+
+        return true;
+      }
+
+      return false;
+    } catch (e) {
+      print("Google Sign-In Error: $e");
+      return false;
+    }
+  }
 }
 
 // ---------------------- LOGIN PAGE ----------------------
@@ -494,15 +608,20 @@ class _LoginPageState extends State<LoginPage> {
 
                 // --- Updated Google Sign-In button ---
                 GestureDetector(
-                  onTap: () {
-                    showDialog(
-                      context: context,
-                      builder: (ctx) => const AlertDialog(
-                        title: Text("Google Sign-In"),
-                        content: Text("Integrate Google Sign-In here."),
-                      ),
-                    );
+                  onTap: () async {
+                    final ok = await GoogleAuthService.signInWithGoogle();
+                    if (ok) {
+                      showGlassAlert(context, "Signed in Successfully");
+                      Navigator.pushAndRemoveUntil(
+                        context,
+                        MaterialPageRoute(builder: (_) => const HomePage()),
+                        (r) => false,
+                      );
+                    } else {
+                      showGlassAlert(context, "Google Sign-In Failed");
+                    }
                   },
+
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(40),
                     child: BackdropFilter(
@@ -601,8 +720,8 @@ class _SignupPageState extends State<SignupPage> {
   final _mobile = TextEditingController();
   final _pass = TextEditingController();
   final _repass = TextEditingController();
-  bool _otpStep = false;
-  final _otpCtrl = TextEditingController();
+  //bool _otpStep = false;
+  //final _otpCtrl = TextEditingController();
 
   bool _loading = false;
 
@@ -648,7 +767,7 @@ class _SignupPageState extends State<SignupPage> {
     );
   }
 
-  Future<void> _trySignup() async {
+  /*Future<void> _trySignup() async {
     if (!_otpStep) {
       setState(() => _loading = true);
       final sent = await _authService.sendOtp(email: _email.text.trim());
@@ -674,6 +793,32 @@ class _SignupPageState extends State<SignupPage> {
 
     if (ok) {
       showGlassAlert(context, "Signup Successful ✅");
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const LoginPage()),
+      );
+    } else {
+      showGlassAlert(context, "Signup Failed");
+    }
+  }*/
+
+  Future<void> _trySignup() async {
+    if (_pass.text.trim() != _repass.text.trim()) {
+      showGlassAlert(context, "Passwords do not match");
+      return;
+    }
+
+    setState(() => _loading = true);
+    final ok = await _authService.register(
+      name: _name.text.trim(),
+      email: _email.text.trim(),
+      mobile: _mobile.text.trim(),
+      password: _pass.text.trim(),
+    );
+    setState(() => _loading = false);
+
+    if (ok) {
+      showGlassAlert(context, "Signup Successful");
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(builder: (_) => const LoginPage()),
@@ -717,7 +862,7 @@ class _SignupPageState extends State<SignupPage> {
                 const SizedBox(height: 10),
                 _frostedField(_repass, "Re-enter password", obscure: true),
                 const SizedBox(height: 18),
-                if (_loading)
+                /*if (_loading)
                   const CircularProgressIndicator(color: Colors.green)
                 else if (!_otpStep)
                   glassActionButton(
@@ -730,102 +875,114 @@ class _SignupPageState extends State<SignupPage> {
                     _otpCtrl,
                     "Enter OTP",
                     kb: TextInputType.number,
-                  ),
-                  const SizedBox(height: 12),
-
-                  GestureDetector(
-                    onTap: () async {
-                      final ok = await _authService.verifyOtp(
-                        email: _email.text.trim(),
-                        otp: _otpCtrl.text.trim(),
-                      );
-                      if (ok) {
-                        showGlassAlert(context, "OTP Verified ✅");
-                        setState(() {});
-                      } else {
-                        showGlassAlert(context, "Invalid OTP ❌");
-                      }
-                    },
-                    child: Text(
-                      "Verify OTP",
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: Colors.green.shade900,
-                        decoration: TextDecoration.underline,
-                      ),
-                    ),
-                  ),
-
-                  const SizedBox(height: 18),
-
-                  Opacity(
-                    opacity: _otpCtrl.text.trim().length == 6 ? 1 : 0.4,
-                    child: IgnorePointer(
-                      ignoring: _otpCtrl.text.trim().length != 6,
-                      child: glassActionButton(
+                  ),*/
+                _loading
+                    ? const CircularProgressIndicator(color: Colors.green)
+                    : glassActionButton(
                         context: context,
-                        label: "Signup",
+                        label: "Submit",
                         onTap: _trySignup,
                       ),
+                const SizedBox(height: 12),
+
+                /*GestureDetector(
+                  onTap: () async {
+                    final ok = await _authService.verifyOtp(
+                      email: _email.text.trim(),
+                      otp: _otpCtrl.text.trim(),
+                    );
+                    if (ok) {
+                      showGlassAlert(context, "OTP Verified ✅");
+                      setState(() {});
+                    } else {
+                      showGlassAlert(context, "Invalid OTP ❌");
+                    }
+                  },
+                  child: Text(
+                    "Verify OTP",
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.green.shade900,
+                      decoration: TextDecoration.underline,
                     ),
                   ),
-                ],
+                ),
 
-                if (!_otpStep) ...[
-                  const SizedBox(height: 18),
-                  _dividerLine(),
-                  const SizedBox(height: 18),
-                  GestureDetector(
-                    onTap: () {
-                      showDialog(
-                        context: context,
-                        builder: (ctx) => const AlertDialog(
-                          title: Text("Google Sign-In"),
-                          content: Text("Integrate Google Sign-In here."),
-                        ),
+                const SizedBox(height: 18),
+
+                Opacity(
+                  opacity: _otpCtrl.text.trim().length == 6 ? 1 : 0.4,
+                  child: IgnorePointer(
+                    ignoring: _otpCtrl.text.trim().length != 6,
+                    child: glassActionButton(
+                      context: context,
+                      label: "Signup",
+                      onTap: _trySignup,
+                    ),
+                  ),
+                ),
+              ],*/
+
+                //if (!_otpStep) ...[
+                const SizedBox(height: 18),
+                _dividerLine(),
+                const SizedBox(height: 18),
+                GestureDetector(
+                  onTap: () async {
+                    final ok = await GoogleAuthService.signInWithGoogle();
+                    if (ok) {
+                      showGlassAlert(context, "Signed up Successfully");
+                      Navigator.pushAndRemoveUntil(
+                        context,
+                        MaterialPageRoute(builder: (_) => const HomePage()),
+                        (r) => false,
                       );
-                    },
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(40),
-                      child: BackdropFilter(
-                        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 22,
-                            vertical: 14,
+                    } else {
+                      showGlassAlert(context, "Google Sign-In Failed");
+                    }
+                  },
+
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(40),
+                    child: BackdropFilter(
+                      filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 22,
+                          vertical: 14,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF4CAF50).withOpacity(0.35),
+                          borderRadius: BorderRadius.circular(40),
+                          border: Border.all(
+                            color: Colors.white.withOpacity(0.25),
                           ),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF4CAF50).withOpacity(0.35),
-                            borderRadius: BorderRadius.circular(40),
-                            border: Border.all(
-                              color: Colors.white.withOpacity(0.25),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Image.asset(
+                              'assets/google_logo.png',
+                              height: 24,
+                              width: 24,
                             ),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Image.asset(
-                                'assets/google_logo.png',
-                                height: 24,
-                                width: 24,
+                            const SizedBox(width: 10),
+                            const Text(
+                              "Sign up with Google",
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16,
+                                color: Colors.white,
                               ),
-                              const SizedBox(width: 10),
-                              const Text(
-                                "Sign up with Google",
-                                style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 16,
-                                  color: Colors.white,
-                                ),
-                              ),
-                            ],
-                          ),
+                            ),
+                          ],
                         ),
                       ),
                     ),
                   ),
-                ],
+                ),
+                //],
               ],
             ),
           ),
@@ -858,8 +1015,6 @@ Future<void> requestLocationPermission(BuildContext context) async {
     );
     return;
   }
-
-  // ✅ Optional: get current location (just to verify)
   final pos = await Geolocator.getCurrentPosition(
     desiredAccuracy: LocationAccuracy.high,
   );
@@ -919,7 +1074,6 @@ class _HomePageState extends State<HomePage> {
       setState(() => _selectedIndex = navController.selectedIndex);
     });
 
-    // ✅ Ask for location permission once HomePage is reached
     WidgetsBinding.instance.addPostFrameCallback((_) {
       requestLocationPermission(context);
     });
@@ -2357,12 +2511,19 @@ final Map<String, Map<String, List<String>>> groundSlotRules = {
     ],
   },
 };
+final Map<String, int> slotNameToId = slotIdMap.map(
+  (key, value) => MapEntry(value, key),
+);
+
+final Map<int, String> slotIdToName = slotIdMap;
 
 class _SlotBookingPageState extends State<SlotBookingPage> {
   late List<String> _slots;
   final Set<String> _selectedSlots = {};
   int _selectedDateIndex = 0;
   final ScrollController _dateScrollController = ScrollController();
+  Set<String> _bookedSlots = {};
+  bool _loadingSlots = true;
 
   @override
   void initState() {
@@ -2402,6 +2563,7 @@ class _SlotBookingPageState extends State<SlotBookingPage> {
           '9:00 PM - 9:30 PM',
           '9:30 PM - 10:00 PM',
         ];
+    _fetchBookedSlots();
   }
 
   @override
@@ -2420,6 +2582,34 @@ class _SlotBookingPageState extends State<SlotBookingPage> {
       _participantCtrls.add({
         'name': TextEditingController(),
         'email': TextEditingController(),
+      });
+    }
+  }
+
+  Future<void> _fetchBookedSlots() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString("access_token");
+    if (token == null) return;
+
+    final groundId = groundNameToId[widget.groundName]; // reverse lookup
+    final date = widget.slotDate; // already YYYY-MM-DD
+
+    final response = await _authService.authGet(
+      Uri.parse(
+        "https://turf-mgmt-sys.onrender.com/api/bookings/booked-slots/?date=$date&ground_id=$groundId",
+      ),
+    );
+
+    if (response.statusCode == 200) {
+      final data = jsonDecode(response.body);
+      final List<dynamic> ids = data["booked_slot_ids"];
+
+      setState(() {
+        _bookedSlots = ids
+            .map((id) => slotIdToName[id] ?? "")
+            .where((name) => name.isNotEmpty)
+            .toSet();
+        _loadingSlots = false;
       });
     }
   }
@@ -2601,9 +2791,7 @@ class _SlotBookingPageState extends State<SlotBookingPage> {
 
                         // ✅ Optionally clear previous slot selections (if needed)
                         _selectedSlots.clear();
-
-                        // ✅ (If you plan to dynamically load slots from backend)
-                        // _refreshSlotsForDate(formattedDate);
+                        _fetchBookedSlots();
                       });
 
                       // ✅ Smooth scroll keeps selected date in view
@@ -2705,39 +2893,45 @@ class _SlotBookingPageState extends State<SlotBookingPage> {
                 itemBuilder: (context, index) {
                   final time = _slots[index];
                   final isSelected = _selectedSlots.contains(time);
+                  final isBooked = _bookedSlots.contains(time);
 
                   return GestureDetector(
-                    onTap: () => _toggleSlot(time),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(14),
-                      child: BackdropFilter(
-                        filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 250),
-                          alignment: Alignment.center,
-                          decoration: BoxDecoration(
-                            color: isSelected
-                                ? Colors.green.shade800.withOpacity(0.65)
-                                : Colors.green.withOpacity(0.12),
-                            borderRadius: BorderRadius.circular(14),
-                            border: Border.all(
-                              color: Colors.white.withOpacity(0.3),
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withOpacity(0.05),
-                                blurRadius: 6,
-                                offset: const Offset(0, 3),
+                    onTap: isBooked ? null : () => _toggleSlot(time),
+                    child: Opacity(
+                      opacity: isBooked ? 0.45 : 1.0,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(14),
+                        child: BackdropFilter(
+                          filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 250),
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: isBooked
+                                  ? Colors.red.shade900.withOpacity(0.22)
+                                  : isSelected
+                                  ? Colors.green.shade800.withOpacity(0.65)
+                                  : Colors.green.withOpacity(0.12),
+                              borderRadius: BorderRadius.circular(14),
+                              border: Border.all(
+                                color: isBooked
+                                    ? Colors.red.shade900.withOpacity(0.35)
+                                    : Colors.white.withOpacity(0.3),
                               ),
-                            ],
-                          ),
-                          child: Text(
-                            time,
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              color: isSelected ? Colors.white : Colors.black87,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
+                            ),
+                            child: Text(
+                              time,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: isBooked
+                                    ? Colors.red.shade900
+                                    : isSelected
+                                    ? Colors.white
+                                    : Colors.black87,
+
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
                           ),
                         ),
@@ -2760,7 +2954,7 @@ class _SlotBookingPageState extends State<SlotBookingPage> {
                     return;
                   }
 
-                  // ✅ Sort slots in chronological order for checking continuity
+                  //  Sort slots in chronological order for checking continuity
                   final sortedSlots =
                       _slots.where((s) => _selectedSlots.contains(s)).toList()
                         ..sort(
@@ -5085,23 +5279,96 @@ class _BookingHistoryPageState extends State<BookingHistoryPage> {
     _fetchBookings();
   }
 
-  Future<void> _fetchBookings() async {
+  Future<void> _cancelBooking(String bookingId) async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString("access_token") ?? prefs.getString("token");
+
+    if (token == null) {
+      showGlassAlert(context, "Session expired, login again.");
+      return;
+    }
+
     try {
-      final response = await http.post(
-        Uri.parse("https://172.26.13.101/api/bookings/"),
+      final response = await _authService.authGet(
+        Uri.parse(
+          "https://turf-mgmt-sys.onrender.com/api/bookings/$bookingId/",
+        ),
       );
+
+      print("Cancel Response: ${response.statusCode} ${response.body}");
+
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        setState(() {
-          bookings = List<Map<String, dynamic>>.from(data);
-          isLoading = false;
-        });
+        showGlassAlert(context, "Booking cancelled successfully.");
+        await _fetchBookings();
+        setState(() {});
       } else {
-        setState(() => isLoading = false);
+        showGlassAlert(context, "Failed to cancel booking.");
       }
     } catch (e) {
-      setState(() => isLoading = false);
+      showGlassAlert(context, "Network Error: $e");
     }
+  }
+
+  Future<void> _fetchBookings() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString("access_token") ?? prefs.getString("token");
+
+    try {
+      final response = await _authService.authGet(
+        Uri.parse("https://turf-mgmt-sys.onrender.com/api/bookings/my/"),
+      );
+
+      if (response.statusCode == 200) {
+        final List data = jsonDecode(response.body);
+        print("BOOKING RAW DATA: $data");
+
+        if (!mounted) return;
+        setState(() {
+          bookings = data.map<Map<String, dynamic>>((b) {
+            final groundName = groundIdMap[b["ground_id"]] ?? "Unknown Ground";
+
+            final slotNames = (b["slots"] as List)
+                .map((id) => slotIdMap[id] ?? "Unknown Slot ($id)")
+                .toList();
+
+            final slotTimeRange = slotNames.isEmpty
+                ? "No slots assigned"
+                : "${slotNames.first} - ${slotNames.last}";
+
+            // ✅ ADD THIS HERE
+            final DateTime now = DateTime.now();
+            final DateTime slotDate = b.containsKey("date")
+                ? DateTime.tryParse(b["date"]) ?? DateTime.now()
+                : DateTime.now();
+            final bool isPast = slotDate.isBefore(now);
+            final DateTime createdAt =
+                DateTime.tryParse(b["created_at"]) ?? DateTime.now();
+            final bool isCancelled = now.difference(createdAt).inHours >= 3;
+
+            return {
+              "bookingId": b["booking_id"],
+              "ground": groundName,
+              "sport": b["players"].isNotEmpty
+                  ? b["players"].first["sport"] ?? "Sport"
+                  : "Sport",
+              "slotCount": b["num_slots"],
+              "slotTimeRange": slotTimeRange,
+              "slotDate": createdAt, // fallback date used for display
+              "bookedOn": createdAt,
+              "players": b["players"] ?? [],
+
+              // ✅ UPDATED STATUS BASED ON CREATED TIME
+              "status": isCancelled ? "cancelled" : "active",
+            };
+          }).toList();
+        });
+      }
+    } catch (e) {
+      print("Fetch error: $e");
+    }
+
+    if (!mounted) return;
+    setState(() => isLoading = false);
   }
 
   @override
@@ -5161,29 +5428,258 @@ class _BookingHistoryPageState extends State<BookingHistoryPage> {
     );
   }
 
-  // Hide Team Members for now
-  Widget _buildBookingTile(BuildContext context, Map<String, dynamic> booking) {
+  Widget _buildBookingTile(BuildContext context, Map<String, dynamic> b) {
+    bool isCancelled = b["status"] == "cancelled";
+
+    Color cardColor = isCancelled
+        ? Colors.red.withOpacity(0.15)
+        : Colors.green.withOpacity(0.10);
+
+    Color borderColor = isCancelled
+        ? Colors.red.withOpacity(0.35)
+        : Colors.green.withOpacity(0.35);
+
     return Container(
-      margin: const EdgeInsets.only(bottom: 20),
-      padding: const EdgeInsets.all(16),
+      margin: const EdgeInsets.only(bottom: 26),
+      padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: Colors.green.withOpacity(0.08),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white.withOpacity(0.3)),
+        color: cardColor,
+        borderRadius: BorderRadius.circular(28),
+        border: Border.all(color: borderColor),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text("Sport: ${booking['sport']}"),
-          Text("Ground: ${booking['ground']}"),
-          Text("Date: ${booking['slotDate']}"),
-          Text("Slot: ${booking['slots']}"),
-          // # Temporarily hide team section (backend not ready)
+          // Status Badge
+          if (isCancelled)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.red.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.red.withOpacity(0.25)),
+              ),
+              child: const Text(
+                "Cancelled",
+                style: TextStyle(
+                  color: Colors.red,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+
+          const SizedBox(height: 10),
+
+          Row(
+            children: [
+              const Icon(Icons.calendar_today_rounded, size: 18),
+              const SizedBox(width: 6),
+              Text(
+                "Booked On: ${b['bookedOn'].day} ${_month(b['bookedOn'].month)} ${b['bookedOn'].year}, ${_formatTime(b['bookedOn'])}",
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 14),
+          _tag(Icons.sports_soccer, "Sport: ${b['sport']}", isCancelled),
+          _tag(Icons.place, "Ground: ${b['ground']}", isCancelled),
+          _tag(
+            Icons.grid_view_rounded,
+            "Slots: ${b['slotCount']}",
+            isCancelled,
+          ),
+          _tag(
+            Icons.calendar_month_rounded,
+            "Slot Date: ${b['slotDate'].day} ${_month(b['slotDate'].month)} ${b['slotDate'].year}",
+            isCancelled,
+          ),
+          _tag(
+            Icons.access_time_rounded,
+            "Time: ${b['slotTimeRange']}",
+            isCancelled,
+          ),
+
+          const SizedBox(height: 18),
+          const Text(
+            "Team Members:",
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 6),
+
+          ...b["players"].map<Widget>((p) {
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Row(
+                children: [
+                  const Icon(Icons.person, size: 18),
+                  const SizedBox(width: 6),
+                  Expanded(child: Text("${p['name']} (${p['email']})")),
+                ],
+              ),
+            );
+          }).toList(),
+
+          const SizedBox(height: 18),
+
+          // Show Cancel Button Only If Active
+          if (!isCancelled)
+            GestureDetector(
+              onTap: () => _cancelBooking(b["bookingId"]),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(14),
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: Colors.green.withOpacity(0.20),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: Colors.green.withOpacity(0.35)),
+                  ),
+                  child: const Text(
+                    "Cancel Booking",
+                    style: TextStyle(
+                      color: Colors.green,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 15,
+                    ),
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
   }
+
+  Widget _tag(IconData icon, String text, bool isCancelled) {
+    final Color mainColor = isCancelled
+        ? Colors.red.shade900
+        : Colors.green.shade900;
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: mainColor.withOpacity(0.22),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: mainColor.withOpacity(0.25)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 18, color: mainColor.withOpacity(0.9)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              text,
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                color: mainColor.withOpacity(0.9),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _month(int m) {
+    const names = [
+      "",
+      "Jan",
+      "Feb",
+      "Mar",
+      "Apr",
+      "May",
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Dec",
+    ];
+    return names[m];
+  }
 }
+
+String _formatTime(DateTime dt) {
+  int hour = dt.hour;
+  String ampm = hour >= 12 ? "PM" : "AM";
+  hour = hour % 12;
+  if (hour == 0) hour = 12;
+  String minute = dt.minute.toString().padLeft(2, '0');
+  return "$hour:$minute $ampm";
+}
+
+final Map<int, String> groundIdMap = {
+  1: "Football Ground 1",
+  2: "Cricket Ground 1",
+  3: "Cricket Ground 2",
+  4: "Hockey Ground",
+  5: "Basketball Ground 1",
+  6: "Basketball Ground 2",
+  7: "Badminton Court 1",
+  8: "Badminton Court 2",
+  9: "Badminton Court 3",
+  10: "Badminton Court 4",
+  11: "Tennis Court 1",
+  12: "Tennis Court 2",
+  13: "Table Tennis Room 1",
+  14: "Table Tennis Room 2",
+  15: "Table Tennis Room 3",
+  16: "Table Tennis Room 4",
+  17: "Volleyball Court",
+};
+
+final Map<int, String> slotIdMap = {
+  1: "8:00 AM - 8:30 AM",
+  2: "8:30 AM - 9:00 AM",
+  3: "9:00 AM - 9:30 AM",
+  4: "9:30 AM - 10:00 AM",
+  5: "10:00 AM - 10:30 AM",
+  6: "10:30 AM - 11:00 AM",
+  7: "11:00 AM - 11:30 AM",
+  8: "11:30 AM - 12:00 PM",
+  9: "12:00 PM - 12:30 PM",
+  10: "12:30 PM - 1:00 PM",
+  11: "1:00 PM - 1:30 PM",
+  12: "1:30 PM - 2:00 PM",
+  13: "2:00 PM - 2:30 PM",
+  14: "2:30 PM - 3:00 PM",
+  15: "3:00 PM - 3:30 PM",
+  16: "3:30 PM - 4:00 PM",
+  17: "4:00 PM - 4:30 PM",
+  18: "4:30 PM - 5:00 PM",
+  19: "5:00 PM - 5:30 PM",
+  20: "5:30 PM - 6:00 PM",
+  21: "6:00 PM - 6:30 PM",
+  22: "6:30 PM - 7:00 PM",
+  23: "7:00 PM - 7:30 PM",
+  24: "7:30 PM - 8:00 PM",
+  25: "8:00 PM - 8:30 PM",
+  26: "8:30 PM - 9:00 PM",
+  27: "9:00 PM - 9:30 PM",
+  28: "9:30 PM - 10:00 PM",
+};
+
+final Map<String, int> groundNameToId = {
+  for (final e in groundIdMap.entries) e.value: e.key,
+};
 
 class FinalSlotBookingPage extends StatefulWidget {
   final String sport;
@@ -5227,6 +5723,9 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
   }
 
   Future<void> _checkCampusAccess() async {
+    LocationPermission permission =
+        await Geolocator.requestPermission(); // ✅ ADD THIS LINE
+
     bool allowed = await isInsideCampus();
     if (!mounted) return;
     setState(() {
@@ -5312,24 +5811,59 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
   }
 
   Future<void> _submitBooking() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString("access_token");
+
+    if (token == null) {
+      showGlassAlert(context, "Session expired. Please login again.");
+      return;
+    }
+    print("GROUND NAME: ${widget.ground}");
+    print("GROUND ID: ${groundIdMap[widget.ground]}");
+
+    print("SELECTED SLOTS: ${widget.selectedSlots}");
+    for (var s in widget.selectedSlots) {
+      print("Slot '$s' → ${slotIdMap[s]}");
+    }
+    final groundId = groundNameToId[widget.ground];
+    final slotIds = widget.selectedSlots
+        .map((s) => slotNameToId[s])
+        .whereType<int>() // filters out nulls safely
+        .toList();
+
+    print("RESOLVED groundId = $groundId");
+    print("RESOLVED slotIds  = $slotIds");
+
+    if (groundId == null) {
+      showGlassAlert(context, "Unknown ground: ${widget.ground}");
+      return;
+    }
+    if (slotIds.isEmpty) {
+      showGlassAlert(context, "Selected slots could not be mapped.");
+      return;
+    }
+
     final bookingData = {
-      "name": "Placeholder Name", // replace later
-      "email": "placeholder@email.com", // replace later
-      "sport": widget.sport,
-      "ground": widget.ground,
-      "slotDate": widget.slotDate,
-      "selectedSlots": widget.selectedSlots,
-      "team": _collectPlayers(),
+      "date": widget.slotDate,
+      "ground_id": groundNameToId[widget.ground]!,
+      "slot_id": widget.selectedSlots.map((s) => slotNameToId[s]!).toList(),
+      "players": _collectPlayers(),
     };
 
     try {
       final response = await http.post(
-        Uri.parse("https://172.26.13.101/api/bookings/my/"), // your endpoint
-        headers: {"Content-Type": "application/json"},
+        Uri.parse("https://turf-mgmt-sys.onrender.com/api/bookings/"),
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer $token",
+        },
         body: jsonEncode(bookingData),
       );
 
-      if (response.statusCode == 200) {
+      print("STATUS: ${response.statusCode}");
+      print("BODY: ${response.body}");
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
         globalNotifications.add({
           "title": "Booking Confirmed",
           "message":
@@ -5352,7 +5886,7 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
           showGlassAlert(context, "Booking successful!");
         }
       } else {
-        showGlassAlert(context, "Booking failed. Please try again.");
+        showGlassAlert(context, "Booking failed (${response.statusCode}).");
       }
     } catch (e) {
       showGlassAlert(context, "Network error: $e");
@@ -5454,6 +5988,7 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
               // --- Player Details ---
               Expanded(
                 child: ListView(
+                  padding: const EdgeInsets.only(bottom: 100),
                   children: [
                     const Text(
                       "Player Details",
@@ -5554,10 +6089,18 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
                       color: const Color(0xFF4CAF50),
                       opacity: 0.25,
                       onTap: () {
+                        if (_checkingLocation) {
+                          showGlassAlert(
+                            context,
+                            "Checking location… please wait.",
+                          );
+                          return;
+                        }
+
                         if (!_insideCampus) {
                           showGlassAlert(
                             context,
-                            "You must be inside IIT Ropar campus to use this feature",
+                            "Location did not verify. Please move near window / enable GPS.",
                           );
                           return;
                         }
