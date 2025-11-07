@@ -23,7 +23,7 @@ class Migration(migrations.Migration):
                 ('is_admin', models.BooleanField(default=False)),
                 ('is_staff', models.BooleanField(default=False)),
                 ('is_active', models.BooleanField(default=True)),
-                ('phone', models.CharField(blank=True, max_length=15, validators=[django.core.validators.RegexValidator('^[0-9+\-() ]*$', 'Enter a valid phone number')])),
+                ('phone', models.CharField(blank=True, max_length=15, validators=[django.core.validators.RegexValidator(r'^[0-9+\-() ]*$', 'Enter a valid phone number')])),
                 ('created_at', models.DateTimeField(db_index=True, default=django.utils.timezone.now)),
                 ('is_superuser', models.BooleanField(default=False)),
             ],
