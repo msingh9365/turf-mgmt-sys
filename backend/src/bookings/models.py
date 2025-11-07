@@ -283,7 +283,7 @@ class Booking(models.Model):
         if self.status != self.STATUS_DONE:
             return False
         
-        # Check if current time is before the booking date
-        # In production, you'd check against slot start time
+        # Check if booking date is today or in the future
+        # Note: This allows same-day cancellations (date-based only, not slot-time-aware)
         now = timezone.now().date()
-        return self.date > now
+        return self.date >= now
