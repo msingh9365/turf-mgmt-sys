@@ -14,6 +14,7 @@ class Team(models.Model):
     member_count = models.IntegerField(default=0)
     sport = models.ForeignKey(Sport, on_delete=models.PROTECT)
     created_at = models.DateTimeField(default=timezone.now)
+    achievements = models.CharField(max_length=300, blank=True, null=True, help_text="Team achievements (optional)")
 
     class Meta:
         db_table = 'teams'
@@ -91,7 +92,7 @@ class Invitation(models.Model):
 
 class TeamAchievement(models.Model):
     achievement_id = models.AutoField(primary_key=True)
-    team = models.ForeignKey(Team, on_delete=models.CASCADE, related_name='achievements')
+    team = models.ForeignKey(Team, on_delete=models.CASCADE, related_name='achievement_records')
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True, null=True)
     date_achieved = models.DateField(auto_now_add=True)

@@ -27,6 +27,7 @@ class TestTeamsAPI:
             "team_name": "Alpha",
             "sport_id": sport.sport_id,
             "member_emails": ["p1@example.com"],
+            "achievements": "Won local league 2025"
         }
 
         # Pre-create the additional member as a user (optional path taken by view)
@@ -38,6 +39,7 @@ class TestTeamsAPI:
         assert data["team_name"] == "Alpha"
         assert data["sport_id"] == sport.sport_id
         assert data["member_count"] == 2
+        assert data["achievements"] == "Won local league 2025"
 
         # Now list should show one team
         resp2 = self.client.get('/api/teams/')

@@ -25,6 +25,7 @@ class TeamSerializer(serializers.ModelSerializer):
             "sport_id",
             "member_count",
             "created_at",
+            "achievements",
             "members",
         ]
         read_only_fields = ["team_id", "member_count", "created_at"]
@@ -35,9 +36,11 @@ class TeamSerializer(serializers.ModelSerializer):
 class TeamCreateSerializer(serializers.ModelSerializer):
     member_emails = serializers.ListField(child=serializers.EmailField(), write_only=True, required=False)
 
+    achievements = serializers.CharField(max_length=300, required=False, allow_blank=True)
+
     class Meta:
         model = Team
-        fields = ["team_name", "sport_id", "member_emails"]
+        fields = ["team_name", "sport_id", "member_emails", "achievements"]
 
     def validate(self, attrs):
         sport_id = attrs.get('sport_id')

@@ -55,7 +55,8 @@ def list_or_create_team(request):
                     team_name=team_name,
                     captain=captain,
                     sport=sport,
-                    member_count=len(member_emails) + 1
+                    member_count=len(member_emails) + 1,
+                    achievements=request.data.get("achievements", "")
                 )
 
                 # ✅ Add captain as team member
@@ -97,6 +98,7 @@ def list_or_create_team(request):
                 "sport_id": team.sport.sport_id,
                 "member_count": team.member_count,
                 "created_at": team.created_at,
+                "achievements": team.achievements,
             }
 
             return Response(team_data, status=status.HTTP_201_CREATED)
