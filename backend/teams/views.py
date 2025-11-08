@@ -2,8 +2,9 @@ from django.conf import settings
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
-from .models import User, Team, Invitation, Sport, TeamMember, TeamAchievement
-from .notification_utils import (
+from teams.models import Team, Invitation, TeamMember, TeamAchievement
+from backend.core_app.models import User, Sport
+from core_app.notification_utils import (
     send_team_invite_notification,
     send_join_request_notification,
     send_match_invite_notification,
@@ -77,9 +78,9 @@ def list_or_create_team(request):
             team_data = {
                 "team_id": team.team_id,
                 "team_name": team.team_name,
-                "captain_name": team.captain_name,
-                "sport_name": team.sport_name,
-                "sport_id": team.sport_id,
+                "captain_name": team.captain.name,
+                "sport_name": team.sport.sport_name,
+                "sport_id": team.sport.sport_id,
                 "member_count": team.member_count,
                 "created_at": team.created_at,
             }
@@ -99,9 +100,9 @@ def list_or_create_team(request):
             {
                 "team_id": t.team_id,
                 "team_name": t.team_name,
-                "captain_name": t.captain_name,
-                "sport_name": t.sport_name,
-                "sport_id": t.sport_id,
+                "captain_name": t.captain.name,
+                "sport_name": t.sport.sport_name,
+                "sport_id": t.sport.sport_id,
                 "member_count": t.member_count,
                 "created_at": t.created_at,
             }

@@ -44,7 +44,8 @@ INSTALLED_APPS = [
 
     'rest_framework',  
     # My Project Apps
-    'backend.core_app',
+    'backend.core_app.apps.CoreAppConfig',
+    'backend.teams.apps.TeamsConfig',
 ]
 
 MIDDLEWARE = [
