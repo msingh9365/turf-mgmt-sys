@@ -1,6 +1,5 @@
 from django.apps import AppConfig
 
-
-class TurfifyConfig(AppConfig):
+class CoreAppConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
-    name = 'turfify'
+    name = 'backend.core_app'  # ✅ exact import path
