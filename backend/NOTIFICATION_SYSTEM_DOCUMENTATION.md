@@ -9,6 +9,7 @@ This document describes the setup, integration, and testing of the push notifica
 - Stores device tokens and notification history in the database.
 - Uses Firebase service account for secure server-side authentication.
 - API endpoints are protected by authentication (JWT/session).
+- **Automatic notifications:** Users receive notifications when bookings are created.
 
 ---
 
@@ -77,39 +78,62 @@ curl -X GET http://localhost:8000/api/notifications/ \
 
 ---
 
-## 4. Testing
+## 4. Automatic Notifications
+
+### Booking Confirmation
+Users automatically receive a push notification when a new booking is created with "Done" status.
+
+**Notification Details:**
+- **Title:** "Booking Confirmed!"
+- **Body:** Includes booking ID, ground name, and date
+- **Data Payload:** Contains booking_id, date, status, and type
+
+**Implementation:**
+- Uses Django signals (`post_save` on `Booking` model)
+- Located in `bookings/signals.py`
+- Error-safe: Notification failures do not prevent booking creation
+
+---
+
+## 5. Testing
 
 ### Manual Testing
 1. Register a device token using the API.
-2. Send a notification to the device/user.
-3. Check notification history via API.
-4. Verify the notification is received on the Android device.
+2. Create a booking via the booking API.
+3. Verify the notification is received on the Android device.
+4. Check notification history via API.
 5. Check Django Admin for device and notification records.
 
 ### Automated Testing
 Run unit tests:
 ```bash
 pytest src/notifications/tests/
+pytest src/bookings/tests/test_notifications.py
 ```
 
 ---
 
-## 5. Troubleshooting
+## 6. Troubleshooting
 - Ensure the Firebase service account is set up correctly.
-- Check backend logs for errors.
+- Check backend logs for errors (notifications are logged extensively).
 - Make sure device tokens are valid and current.
 - Verify environment variable is set in production.
+- If bookings create successfully but notifications don't send:
+  - Check that the user has registered devices
+  - Verify Firebase credentials are valid
+  - Check application logs for signal errors
 
 ---
 
-## 6. Security Notes
+## 7. Security Notes
 - Never commit the service account JSON file to version control.
 - Always use environment variables for secrets in production.
 - All notification endpoints require authentication.
+- Notification failures are logged but do not disrupt core functionality.
 
 ---
 
-## 7. References
+## 8. References
 - [Firebase Admin SDK Python Docs](https://firebase.google.com/docs/admin/setup)
 - [Django REST Framework Docs](https://www.django-rest-framework.org/)
 - [Render Environment Variables](https://render.com/docs/environment-variables)

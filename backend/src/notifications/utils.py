@@ -34,6 +34,14 @@ class FCMNotificationSender:
     Uses firebase-admin and service account for secure FCM notification sending.
     """
     def send_to_device(self, device_token, title, body, data=None):
+        """
+        Send notification to a single device.
+        Returns message_id on success, None on failure.
+        """
+        # Ensure data values are strings (FCM requirement)
+        if data:
+            data = {k: str(v) for k, v in data.items()}
+        
         message = messaging.Message(
             notification=messaging.Notification(
                 title=title,
@@ -51,25 +59,56 @@ class FCMNotificationSender:
             return None
 
     def send_to_user(self, user, title, body, data=None):
+        """
+        Send notification to all active devices of a user.
+        Creates a Notification record only once per user (not per device).
+        Returns list of responses.
+        """
         devices = UserDevice.objects.filter(user=user, is_active=True)
+        
+        if not devices.exists():
+            logger.warning(f"No active devices found for user {user.id}")
+            return []
+        
         results = []
+        success = False
+        
         for device in devices:
             resp = self.send_to_device(device.device_token, title, body, data)
             results.append(resp)
             if resp:
-                Notification.objects.create(user=user, title=title, body=body, data=data or {})
-            else:
-                logger.error(f"Failed to send notification to {device.device_token}")
+                success = True
+        
+        # Create notification record only if at least one send was successful
+        if success:
+            Notification.objects.create(user=user, title=title, body=body, data=data or {})
+            logger.info(f"Notification record created for user {user.id}")
+        
         return results
 
     def broadcast(self, title, body, data=None):
+        """
+        Broadcast notification to all active devices.
+        Creates individual Notification records for each user.
+        Returns list of responses.
+        """
         devices = UserDevice.objects.filter(is_active=True)
+        
+        if not devices.exists():
+            logger.warning("No active devices found for broadcast")
+            return []
+        
         results = []
+        notified_users = set()
+        
         for device in devices:
             resp = self.send_to_device(device.device_token, title, body, data)
             results.append(resp)
-            if resp:
+            
+            # Create notification record once per user
+            if resp and device.user.id not in notified_users:
                 Notification.objects.create(user=device.user, title=title, body=body, data=data or {})
-            else:
-                logger.error(f"Failed to send notification to {device.device_token}")
+                notified_users.add(device.user.id)
+        
+        logger.info(f"Broadcast sent to {len(notified_users)} users")
         return results
