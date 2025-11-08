@@ -141,26 +141,22 @@ class BookingViewSet(viewsets.ModelViewSet):
                 }
             )
         
-        # Member Lock System: Check if any registered user already has a booking on this ground/date
+        # Member Lock System: Block booking if user or any registered member is already booked for any requested slot on the same date (any ground)
         registered_player_emails = [p["email"] for p in normalized_players if p["is_user"]]
-        
         if registered_player_emails:
-            # Check for existing active bookings for these members on the same ground, date, and slot(s)
-            # Only trigger conflict if slot(s) overlap
+            # Check for any booking for any requested slot on the same date for any ground
             conflicting_bookings = (
                 Booked_Details.objects
                 .filter(
-                    ground=ground,
                     date=booking_date,
                     is_user=True,
                     player_email__in=registered_player_emails,
-                    slot_id__in=slot_ids,  # Only check for overlapping slots
+                    slot_id__in=slot_ids,
                 )
                 .filter(booking__status=Booking.STATUS_DONE)
-                .values('player_email', 'player_name', 'booking_id', 'slot_id')
+                .values('player_email', 'player_name', 'booking_id', 'slot_id', 'ground')
             )
             if conflicting_bookings:
-                # Get the first conflict for reporting
                 conflict = conflicting_bookings[0]
                 conflicting_player_email = conflict['player_email']
                 conflicting_player_name = conflict['player_name']
@@ -168,13 +164,13 @@ class BookingViewSet(viewsets.ModelViewSet):
                 conflicting_slot_id = conflict['slot_id']
                 logger.warning(
                     f"Member lock violation: {conflicting_player_email} already has booking "
-                    f"{conflicting_booking_id} on {ground.ground_name} for {booking_date} (slot {conflicting_slot_id})"
+                    f"{conflicting_booking_id} for slot {conflicting_slot_id} on {booking_date} (any ground)"
                 )
                 return Response(
                     {
                         "error": "Member lock violation",
                         "message": f"Player '{conflicting_player_name}' ({conflicting_player_email}) "
-                                   f"already has an active booking on this ground for {booking_date} (slot {conflicting_slot_id}). "
+                                   f"already has an active booking for slot {conflicting_slot_id} on {booking_date} (any ground). "
                                    f"Booking ID: {conflicting_booking_id}",
                         "conflicting_player": conflicting_player_email,
                         "existing_booking_id": conflicting_booking_id,
