@@ -318,6 +318,19 @@ class AuthService {
     return http.get(url, headers: {"Authorization": "Bearer $accessToken"});
   }
 
+  Future<http.Response> authDelete(Uri url) async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString("access_token") ?? prefs.getString("token");
+
+    return http.delete(
+      url,
+      headers: {
+        "Authorization": "Bearer $token",
+        "Content-Type": "application/json",
+      },
+    );
+  }
+
   Future<http.Response> authPost(Uri url, Map data) async {
     final prefs = await SharedPreferences.getInstance();
     String? accessToken = prefs.getString("access_token");
@@ -5289,7 +5302,7 @@ class _BookingHistoryPageState extends State<BookingHistoryPage> {
     }
 
     try {
-      final response = await _authService.authGet(
+      final response = await _authService.authDelete(
         Uri.parse(
           "https://turf-mgmt-sys.onrender.com/api/bookings/$bookingId/",
         ),
@@ -5297,15 +5310,17 @@ class _BookingHistoryPageState extends State<BookingHistoryPage> {
 
       print("Cancel Response: ${response.statusCode} ${response.body}");
 
-      if (response.statusCode == 200) {
+      if (!mounted) return;
+
+      if (response.statusCode == 200 || response.statusCode == 204) {
         showGlassAlert(context, "Booking cancelled successfully.");
         await _fetchBookings();
-        setState(() {});
+        if (mounted) setState(() {});
       } else {
         showGlassAlert(context, "Failed to cancel booking.");
       }
     } catch (e) {
-      showGlassAlert(context, "Network Error: $e");
+      if (mounted) showGlassAlert(context, "Network Error: $e");
     }
   }
 
@@ -5318,13 +5333,28 @@ class _BookingHistoryPageState extends State<BookingHistoryPage> {
         Uri.parse("https://turf-mgmt-sys.onrender.com/api/bookings/my/"),
       );
 
+      print("BOOKING RESPONSE = ${response.statusCode} ${response.body}");
+
       if (response.statusCode == 200) {
         final List data = jsonDecode(response.body);
-        print("BOOKING RAW DATA: $data");
+        final DateTime now = DateTime.now();
 
         if (!mounted) return;
         setState(() {
           bookings = data.map<Map<String, dynamic>>((b) {
+            final DateTime createdAt =
+                DateTime.tryParse(b["created_at"]) ?? now;
+
+            // ✅ Normalize status from backend
+            String status = (b["status"] ?? "active").toString().toLowerCase();
+            if (status == "rejected") status = "cancelled";
+
+            // ✅ Mark completed only if time passed and not cancelled
+            if (status != "cancelled" &&
+                now.difference(createdAt).inHours >= 3) {
+              status = "completed";
+            }
+
             final groundName = groundIdMap[b["ground_id"]] ?? "Unknown Ground";
 
             final slotNames = (b["slots"] as List)
@@ -5335,16 +5365,6 @@ class _BookingHistoryPageState extends State<BookingHistoryPage> {
                 ? "No slots assigned"
                 : "${slotNames.first} - ${slotNames.last}";
 
-            // ✅ ADD THIS HERE
-            final DateTime now = DateTime.now();
-            final DateTime slotDate = b.containsKey("date")
-                ? DateTime.tryParse(b["date"]) ?? DateTime.now()
-                : DateTime.now();
-            final bool isPast = slotDate.isBefore(now);
-            final DateTime createdAt =
-                DateTime.tryParse(b["created_at"]) ?? DateTime.now();
-            final bool isCancelled = now.difference(createdAt).inHours >= 3;
-
             return {
               "bookingId": b["booking_id"],
               "ground": groundName,
@@ -5353,12 +5373,10 @@ class _BookingHistoryPageState extends State<BookingHistoryPage> {
                   : "Sport",
               "slotCount": b["num_slots"],
               "slotTimeRange": slotTimeRange,
-              "slotDate": createdAt, // fallback date used for display
+              "slotDate": createdAt,
               "bookedOn": createdAt,
               "players": b["players"] ?? [],
-
-              // ✅ UPDATED STATUS BASED ON CREATED TIME
-              "status": isCancelled ? "cancelled" : "active",
+              "status": status,
             };
           }).toList();
         });
@@ -5430,14 +5448,21 @@ class _BookingHistoryPageState extends State<BookingHistoryPage> {
 
   Widget _buildBookingTile(BuildContext context, Map<String, dynamic> b) {
     bool isCancelled = b["status"] == "cancelled";
+    bool isCompleted = b["status"] == "completed"; // expired slot
 
-    Color cardColor = isCancelled
-        ? Colors.red.withOpacity(0.15)
-        : Colors.green.withOpacity(0.10);
+    Color cardColor;
+    Color borderColor;
 
-    Color borderColor = isCancelled
-        ? Colors.red.withOpacity(0.35)
-        : Colors.green.withOpacity(0.35);
+    if (isCancelled) {
+      cardColor = Colors.red.withOpacity(0.15);
+      borderColor = Colors.red.withOpacity(0.35);
+    } else if (isCompleted) {
+      cardColor = Colors.grey.withOpacity(0.20);
+      borderColor = Colors.grey.withOpacity(0.35);
+    } else {
+      cardColor = Colors.green.withOpacity(0.10);
+      borderColor = Colors.green.withOpacity(0.35);
+    }
 
     return Container(
       margin: const EdgeInsets.only(bottom: 26),
@@ -5475,6 +5500,23 @@ class _BookingHistoryPageState extends State<BookingHistoryPage> {
               ),
             ),
 
+          if (isCompleted)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.grey.withOpacity(0.20),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.grey.withOpacity(0.30)),
+              ),
+              child: const Text(
+                "Completed",
+                style: TextStyle(
+                  color: Colors.black87,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+
           const SizedBox(height: 10),
 
           Row(
@@ -5492,22 +5534,30 @@ class _BookingHistoryPageState extends State<BookingHistoryPage> {
           ),
 
           const SizedBox(height: 14),
-          _tag(Icons.sports_soccer, "Sport: ${b['sport']}", isCancelled),
-          _tag(Icons.place, "Ground: ${b['ground']}", isCancelled),
+          _tag(
+            Icons.sports_soccer,
+            "Sport: ${b['sport']}",
+            isCancelled,
+            isCompleted,
+          ),
+          _tag(Icons.place, "Ground: ${b['ground']}", isCancelled, isCompleted),
           _tag(
             Icons.grid_view_rounded,
             "Slots: ${b['slotCount']}",
             isCancelled,
+            isCompleted,
           ),
           _tag(
             Icons.calendar_month_rounded,
             "Slot Date: ${b['slotDate'].day} ${_month(b['slotDate'].month)} ${b['slotDate'].year}",
             isCancelled,
+            isCompleted,
           ),
           _tag(
             Icons.access_time_rounded,
             "Time: ${b['slotTimeRange']}",
             isCancelled,
+            isCompleted,
           ),
 
           const SizedBox(height: 18),
@@ -5532,8 +5582,8 @@ class _BookingHistoryPageState extends State<BookingHistoryPage> {
 
           const SizedBox(height: 18),
 
-          // Show Cancel Button Only If Active
-          if (!isCancelled)
+          // ✅ Show button only if active
+          if (!isCancelled && !isCompleted)
             GestureDetector(
               onTap: () => _cancelBooking(b["bookingId"]),
               child: ClipRRect(
@@ -5563,10 +5613,16 @@ class _BookingHistoryPageState extends State<BookingHistoryPage> {
     );
   }
 
-  Widget _tag(IconData icon, String text, bool isCancelled) {
-    final Color mainColor = isCancelled
-        ? Colors.red.shade900
-        : Colors.green.shade900;
+  Widget _tag(IconData icon, String text, bool isCancelled, bool isCompleted) {
+    Color mainColor;
+
+    if (isCancelled) {
+      mainColor = Colors.red.shade900;
+    } else if (isCompleted) {
+      mainColor = Colors.grey.shade700;
+    } else {
+      mainColor = Colors.green.shade900;
+    }
 
     return Container(
       width: double.infinity,
@@ -6089,7 +6145,7 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
                       color: const Color(0xFF4CAF50),
                       opacity: 0.25,
                       onTap: () {
-                        if (_checkingLocation) {
+                        /*if (_checkingLocation) {
                           showGlassAlert(
                             context,
                             "Checking location… please wait.",
@@ -6103,7 +6159,7 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
                             "Location did not verify. Please move near window / enable GPS.",
                           );
                           return;
-                        }
+                        }*/
                         _submitBooking();
                       },
                     ),
