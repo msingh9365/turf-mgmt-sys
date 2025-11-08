@@ -36,7 +36,31 @@ pip install -r requirements.txt
 
 ### Register Device
 `POST /api/notifications/register/`
+
 Registers or updates a device token for the logged-in user.
+
+**Request Body:**
+```json
+{
+  "device_token": "string (required) - FCM device token from Android app",
+  "device_type": "string (required) - 'android' or 'ios'"
+}
+```
+
+**Response (201 Created):**
+```json
+{
+  "detail": "Device registered."
+}
+```
+
+**Error Response (400 Bad Request):**
+```json
+{
+  "device_token": ["This field is required."],
+  "device_type": ["This field is required."]
+}
+```
 
 **Example:**
 ```bash
@@ -46,11 +70,38 @@ curl -X POST http://localhost:8000/api/notifications/register/ \
   -d '{"device_token": "<ANDROID_DEVICE_TOKEN>", "device_type": "android"}'
 ```
 
+---
+
 ### Send Notification
 `POST /api/notifications/send/`
-Sends a notification to a user or broadcasts to all users.
 
-**To a specific user:**
+Sends a notification to a specific user or broadcasts to all users.
+
+**Request Body:**
+```json
+{
+  "title": "string (required) - Notification title",
+  "body": "string (required) - Notification message body",
+  "data": "object (optional) - Additional data payload",
+  "user_id": "integer (optional) - Target user ID. If omitted, broadcasts to all users"
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "detail": "Notification sent."
+}
+```
+
+**Error Response (404 Not Found):**
+```json
+{
+  "detail": "User not found."
+}
+```
+
+**Example - To a specific user:**
 ```bash
 curl -X POST http://localhost:8000/api/notifications/send/ \
   -H "Authorization: Bearer <JWT_TOKEN>" \
@@ -58,7 +109,7 @@ curl -X POST http://localhost:8000/api/notifications/send/ \
   -d '{"title": "Test Notification", "body": "Hello from backend!", "user_id": <USER_ID>}'
 ```
 
-**Broadcast to all users:**
+**Example - Broadcast to all users:**
 ```bash
 curl -X POST http://localhost:8000/api/notifications/send/ \
   -H "Authorization: Bearer <JWT_TOKEN>" \
@@ -66,14 +117,130 @@ curl -X POST http://localhost:8000/api/notifications/send/ \
   -d '{"title": "Broadcast", "body": "This is a broadcast message"}'
 ```
 
+---
+
 ### Get Notification History
 `GET /api/notifications/`
+
 Retrieves the authenticated user's notification history.
+
+**Request:** No body required.
+
+**Response (200 OK):**
+```json
+[
+  {
+    "id": 1,
+    "user": 5,
+    "title": "Booking Confirmed!",
+    "body": "Your booking BK20251109ABC123 for Main Ground on 2025-11-15 is confirmed.",
+    "data": {
+      "booking_id": "BK20251109ABC123",
+      "date": "2025-11-15",
+      "status": "Done",
+      "type": "booking_confirmation"
+    },
+    "is_read": false,
+    "created_at": "2025-11-09T10:30:00Z"
+  },
+  {
+    "id": 2,
+    "user": 5,
+    "title": "Players Needed for Football!",
+    "body": "John Doe (john@example.com) is looking for players for Football on 2025-11-15 at 18:00. Interested? Contact them!",
+    "data": {
+      "type": "looking_for_players",
+      "sport_id": "1",
+      "sport_name": "Football",
+      "date": "2025-11-15",
+      "slot_id": "36",
+      "slot_time": "18:00",
+      "user_name": "John Doe",
+      "user_email": "john@example.com"
+    },
+    "is_read": false,
+    "created_at": "2025-11-09T09:15:00Z"
+  }
+]
+```
 
 **Example:**
 ```bash
 curl -X GET http://localhost:8000/api/notifications/ \
   -H "Authorization: Bearer <JWT_TOKEN>"
+```
+
+---
+
+### Broadcast Looking for Players
+`POST /api/notifications/broadcast/looking-for-players/`
+
+Broadcasts a notification to all app users that the authenticated user is looking for players for a specific sport, date, and time.
+
+**Request Body:**
+```json
+{
+  "sport_id": "integer (required) - ID of the sport",
+  "date": "string (required) - Date of the game in YYYY-MM-DD format",
+  "slot_id": "integer (required) - Time slot ID for the game"
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "detail": "Broadcast notification sent successfully.",
+  "recipients": 25,
+  "sport": "Football",
+  "date": "2025-11-15",
+  "slot_time": "18:00"
+}
+```
+
+**Error Response (400 Bad Request - Missing fields):**
+```json
+{
+  "detail": "sport_id, date, and slot_id are required."
+}
+```
+
+**Error Response (404 Not Found - Invalid sport):**
+```json
+{
+  "detail": "Sport not found."
+}
+```
+
+**Error Response (404 Not Found - Invalid slot):**
+```json
+{
+  "detail": "Slot not found."
+}
+```
+
+**Example:**
+```bash
+curl -X POST http://localhost:8000/api/notifications/broadcast/looking-for-players/ \
+  -H "Authorization: Bearer <JWT_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"sport_id": 1, "date": "2025-11-15", "slot_id": 36}'
+```
+
+**Notification Message Sent to All Users:**
+- **Title:** "Players Needed for Football!"
+- **Body:** "John Doe (john@example.com) is looking for players for Football on 2025-11-15 at 18:00. Interested? Contact them!"
+- **Data Payload:**
+```json
+{
+  "type": "looking_for_players",
+  "sport_id": "1",
+  "sport_name": "Football",
+  "date": "2025-11-15",
+  "slot_id": "36",
+  "slot_time": "18:00",
+  "user_name": "John Doe",
+  "user_email": "john@example.com"
+}
 ```
 
 ---
@@ -93,6 +260,22 @@ Users automatically receive a push notification when a new booking is created wi
 - Located in `bookings/signals.py`
 - Error-safe: Notification failures do not prevent booking creation
 
+### Looking for Players Broadcast
+Users can broadcast to all app users that they're looking for players for a specific sport, date, and time slot.
+
+**Notification Details:**
+- **Title:** "Players Needed for [Sport]!"
+- **Body:** "[User Name] ([User Email]) is looking for players for [Sport] on [Date] at [Time]. Interested? Contact them!"
+- **Data Payload:** Contains sport details, date, slot info, user name, and user contact information
+
+**API Endpoint:** `POST /api/notifications/broadcast/looking-for-players/`
+
+**Future Enhancement:** Can be extended to target specific user segments based on:
+- Sport preferences
+- Location/ground preferences
+- Skill level
+- Past playing history
+
 ---
 
 ## 5. Testing
@@ -110,6 +293,13 @@ Run unit tests:
 pytest src/notifications/tests/
 pytest src/bookings/tests/test_notifications.py
 ```
+
+**Test Coverage:**
+- Device registration and management
+- Notification sending and history
+- Automatic booking notifications
+- Broadcast looking for players functionality
+- Error handling and edge cases
 
 ---
 
