@@ -60,31 +60,41 @@ def list_or_create_team(request):
                 )
 
                 # ✅ Add captain as team member
+                captain_email = getattr(captain, 'email', '')
                 TeamMember.objects.create(
                     team=team,
                     user=captain,
                     member_name=getattr(captain, 'name', captain.email),
-                    email_id=getattr(captain, 'email', ''),
+                    email_id=captain_email,
+                    sort_key=captain_email[:7] if len(captain_email) >= 7 else captain_email,
                     role="captain"
                 )
 
                 # ✅ Add other members (only valid users)
                 added_members = 0
+                failed_emails = []
                 for email in member_emails:
                     try:
-                        member = User.objects.get(email=email)
+                        # Optimized lookup: First filter by sort_key index (first 7 chars of email)
+                        # then perform exact match on the filtered results
+                        # Use case-insensitive match for sort_key since emails are lowercased
+                        sort_key_prefix = email[:7] if len(email) >= 7 else email
+                        member = User.objects.filter(sort_key__iexact=sort_key_prefix).get(email__iexact=email)
+                        
                         # Try to create, skip silently if duplicate (shouldn't happen with dedup above)
+                        member_email = getattr(member, 'email', '')
                         TeamMember.objects.create(
                             team=team,
                             user=member,
                             member_name=getattr(member, 'name', member.email),
-                            email_id=getattr(member, 'email', ''),
+                            email_id=member_email,
+                            sort_key=member_email[:7] if len(member_email) >= 7 else member_email,
                             role="player"
                         )
                         added_members += 1
                     except User.DoesNotExist:
-                        # Silently skip non-existent users
-                        pass
+                        # Track emails that don't correspond to registered users
+                        failed_emails.append(email)
 
                 # Update actual member count based on what was added
                 team.member_count = added_members + 1  # +1 for captain
@@ -100,6 +110,10 @@ def list_or_create_team(request):
                 "created_at": team.created_at,
                 "achievements": team.achievements,
             }
+            
+            # Add warning if some members weren't added
+            if failed_emails:
+                team_data["warning"] = f"Team created but {len(failed_emails)} member(s) not found: {', '.join(failed_emails)}"
 
             return Response(team_data, status=status.HTTP_201_CREATED)
 

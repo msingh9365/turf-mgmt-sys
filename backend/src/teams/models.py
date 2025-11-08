@@ -41,6 +41,7 @@ class TeamMember(models.Model):
     )
     member_name = models.CharField(max_length=100)
     email_id = models.EmailField(max_length=100)
+    sort_key = models.CharField(max_length=20, db_index=True, default='', help_text="First 7 chars of email for optimized lookup")
     role = models.CharField(max_length=20, default='player')  # 'captain' or 'player'
     date_joined = models.DateTimeField(default=timezone.now)
 
