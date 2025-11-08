@@ -166,7 +166,8 @@ def retrieve_team_details(request, id):
             # Use len of in-memory list to avoid extra COUNT query
             "member_count": len(members_data),
             "members": members_data,
-            "achievements": [] # Placeholder for achievements
+            "created_at": team.created_at,
+            "achievements": team.achievements,
         }
         return Response(team_data, status=status.HTTP_200_OK)
     except Team.DoesNotExist:
