@@ -17,6 +17,9 @@ class Team(models.Model):
 
     class Meta:
         db_table = 'teams'
+        constraints = [
+            models.UniqueConstraint(fields=['team_name'], name='unique_team_name')
+        ]
 
     def __str__(self):
         return f"{self.team_name} ({self.sport.sport_name})"
@@ -38,6 +41,10 @@ class TeamMember(models.Model):
 
     class Meta:
         db_table = 'team_members'
+        constraints = [
+            # Ensure the same user cannot be added to a team multiple times
+            models.UniqueConstraint(fields=['team', 'user'], name='unique_team_member')
+        ]
 
     def __str__(self):
         return f"{self.member_name} ({self.role}) - {self.team.team_name}"

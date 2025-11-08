@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.db import IntegrityError, transaction
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status, permissions
@@ -21,6 +22,10 @@ def list_or_create_team(request):
             team_name = request.data["team_name"]
             sport_id = request.data["sport_id"]
             member_emails = request.data.get("member_emails", [])
+            
+            # Deduplicate member emails (case-insensitive) and filter empty strings
+            member_emails = list(set(email.strip().lower() for email in member_emails if email and email.strip()))
+            
             # captain = request.user
 
             # ✅ Temporary captain for testing
@@ -30,6 +35,11 @@ def list_or_create_team(request):
                 return Response({"message": "No users found. Please add users first."}, status=status.HTTP_400_BAD_REQUEST)
 
             sport = Sport.objects.get(sport_id=sport_id)
+            
+            # Remove captain's email from member list if accidentally included
+            captain_email = getattr(captain, 'email', '').lower()
+            if captain_email in member_emails:
+                member_emails.remove(captain_email)
 
             # ✅ Minimum player validation
             if len(member_emails) + 1 < sport.min_player:  # +1 for captain
@@ -38,37 +48,46 @@ def list_or_create_team(request):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # ✅ Create team
-            team = Team.objects.create(
-                team_name=team_name,
-                captain=captain,
-                sport=sport,
-                member_count=len(member_emails) + 1
-            )
+            # Use atomic transaction to ensure all-or-nothing team creation
+            with transaction.atomic():
+                # ✅ Create team (will raise IntegrityError if duplicate name)
+                team = Team.objects.create(
+                    team_name=team_name,
+                    captain=captain,
+                    sport=sport,
+                    member_count=len(member_emails) + 1
+                )
 
-            # ✅ Add captain as team member
-            TeamMember.objects.create(
-                team=team,
-                user=captain,
-                member_name=getattr(captain, 'name', captain.email),
-                email_id=getattr(captain, 'email', ''),
-                role="captain"
-            )
+                # ✅ Add captain as team member
+                TeamMember.objects.create(
+                    team=team,
+                    user=captain,
+                    member_name=getattr(captain, 'name', captain.email),
+                    email_id=getattr(captain, 'email', ''),
+                    role="captain"
+                )
 
+                # ✅ Add other members (only valid users)
+                added_members = 0
+                for email in member_emails:
+                    try:
+                        member = User.objects.get(email=email)
+                        # Try to create, skip silently if duplicate (shouldn't happen with dedup above)
+                        TeamMember.objects.create(
+                            team=team,
+                            user=member,
+                            member_name=getattr(member, 'name', member.email),
+                            email_id=getattr(member, 'email', ''),
+                            role="player"
+                        )
+                        added_members += 1
+                    except User.DoesNotExist:
+                        # Silently skip non-existent users
+                        pass
 
-            # ✅ Add other members
-            for email in member_emails:
-                try:
-                    member = User.objects.get(email=email)
-                    TeamMember.objects.create(
-                        team=team,
-                        user=member,
-                        member_name=getattr(member, 'name', member.email),
-                        email_id=getattr(member, 'email', ''),
-                        role="player"
-                    )
-                except User.DoesNotExist:
-                    print(f"⚠️ User with email {email} not found — skipped.")
+                # Update actual member count based on what was added
+                team.member_count = added_members + 1  # +1 for captain
+                team.save(update_fields=['member_count'])
 
             team_data = {
                 "team_id": team.team_id,
@@ -82,6 +101,18 @@ def list_or_create_team(request):
 
             return Response(team_data, status=status.HTTP_201_CREATED)
 
+        except IntegrityError as e:
+            # Handle unique constraint violations
+            if 'unique_team_name' in str(e).lower() or 'team_name' in str(e).lower():
+                return Response(
+                    {"message": f"Team name '{team_name}' already exists. Please choose a different name."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            else:
+                return Response(
+                    {"message": "Database integrity error. Please check your data."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
         except (KeyError, Sport.DoesNotExist) as e:
             return Response(
                 {"message": f"Invalid request: {e}. team_name and sport_id are required."},
