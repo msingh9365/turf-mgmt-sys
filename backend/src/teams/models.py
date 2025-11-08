@@ -1,11 +1,16 @@
 from django.db import models
 from django.utils import timezone
-from backend.core_app.models import User, Sport
+from django.conf import settings
+from bookings.models import Sport
 
 class Team(models.Model):
     team_id = models.AutoField(primary_key=True)
     team_name = models.CharField(max_length=100)
-    captain = models.ForeignKey(User, on_delete=models.CASCADE, related_name='captained_teams')
+    captain = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='captained_teams'
+    )
     member_count = models.IntegerField(default=0)
     sport = models.ForeignKey(Sport, on_delete=models.PROTECT)
     created_at = models.DateTimeField(default=timezone.now)
@@ -19,7 +24,13 @@ class Team(models.Model):
 
 class TeamMember(models.Model):
     team = models.ForeignKey(Team, on_delete=models.CASCADE, related_name='members')
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='team_memberships', null=True, blank=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='team_memberships',
+        null=True,
+        blank=True,
+    )
     member_name = models.CharField(max_length=100)
     email_id = models.EmailField(max_length=100)
     role = models.CharField(max_length=20, default='player')  # 'captain' or 'player'
@@ -47,8 +58,18 @@ class Invitation(models.Model):
     ]
 
     invitation_id = models.AutoField(primary_key=True)
-    sender = models.ForeignKey(User, on_delete=models.CASCADE, related_name='sent_invitations', null=True, blank=True)
-    recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name='received_invitations')
+    sender = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='sent_invitations',
+        null=True,
+        blank=True,
+    )
+    recipient = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='received_invitations'
+    )
     type = models.CharField(max_length=20, choices=INVITATION_TYPES)
     related_team = models.ForeignKey(Team, on_delete=models.CASCADE, null=True, blank=True)
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='SENT')
@@ -56,7 +77,7 @@ class Invitation(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"Invitation ({self.get_type_display()}) to {self.recipient.name}"
+        return f"Invitation ({self.get_type_display()}) to {getattr(self.recipient, 'name', str(self.recipient))}"
 
     class Meta:
         db_table = 'invitations'
@@ -67,7 +88,7 @@ class TeamAchievement(models.Model):
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True, null=True)
     date_achieved = models.DateField(auto_now_add=True)
-    players = models.ManyToManyField(User, related_name='player_achievements', blank=True)
+    players = models.ManyToManyField(settings.AUTH_USER_MODEL, related_name='player_achievements', blank=True)
 
     def __str__(self):
         return f"{self.team.team_name} - {self.title}"

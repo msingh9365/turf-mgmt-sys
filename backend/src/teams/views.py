@@ -1,10 +1,12 @@
 from django.conf import settings
-from rest_framework.decorators import api_view
+from django.contrib.auth import get_user_model
+from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework import status, permissions
 from teams.models import Team, Invitation, TeamMember, TeamAchievement
-from backend.core_app.models import User, Sport
-import datetime
+from bookings.models import Sport
+
+User = get_user_model()
 
 
 @api_view(["GET", "POST"])
@@ -22,7 +24,8 @@ def list_or_create_team(request):
             # captain = request.user
 
             # ✅ Temporary captain for testing
-            captain = User.objects.first()
+            # TODO: Replace fallback with request.user once auth is wired for this endpoint
+            captain = request.user if request.user and request.user.is_authenticated else User.objects.first()
             if not captain:
                 return Response({"message": "No users found. Please add users first."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -47,21 +50,21 @@ def list_or_create_team(request):
             TeamMember.objects.create(
                 team=team,
                 user=captain,
-                member_name=captain.name,
-                email_id=captain.email_id,
-                role="player"
-)
+                member_name=getattr(captain, 'name', captain.email),
+                email_id=getattr(captain, 'email', ''),
+                role="captain"
+            )
 
 
             # ✅ Add other members
             for email in member_emails:
                 try:
-                    member = User.objects.get(email_id=email)
+                    member = User.objects.get(email=email)
                     TeamMember.objects.create(
                         team=team,
                         user=member,
-                        member_name=member.name,
-                        email_id=member.email_id,
+                        member_name=getattr(member, 'name', member.email),
+                        email_id=getattr(member, 'email', ''),
                         role="player"
                     )
                 except User.DoesNotExist:
@@ -70,7 +73,7 @@ def list_or_create_team(request):
             team_data = {
                 "team_id": team.team_id,
                 "team_name": team.team_name,
-                "captain_name": team.captain.name,
+                "captain_name": getattr(team.captain, 'name', team.captain.email),
                 "sport_name": team.sport.sport_name,
                 "sport_id": team.sport.sport_id,
                 "member_count": team.member_count,
@@ -87,12 +90,13 @@ def list_or_create_team(request):
 
     # ✅ GET: List all teams
     if request.method == "GET":
-        teams = Team.objects.all()
+        # Optimize query pattern: select related captain and sport to prevent N+1
+        teams = Team.objects.select_related("captain", "sport").all()
         data = [
             {
                 "team_id": t.team_id,
                 "team_name": t.team_name,
-                "captain_name": t.captain.name,
+                "captain_name": getattr(t.captain, 'name', t.captain.email),
                 "sport_name": t.sport.sport_name,
                 "sport_id": t.sport.sport_id,
                 "member_count": t.member_count,
@@ -110,22 +114,76 @@ def retrieve_team_details(request, id):
     Retrieves details for a specific team.
     """
     try:
-        team = Team.objects.get(team_id=id)
-        members_data = [{
-            "user_id": member.user_id,
-            "name": member.name,
-            "role": TeamMember.objects.get(team=team, user=member).role
-        } for member in team.members.all()]
+        # select_related to reduce FK lookups
+        team = Team.objects.select_related('captain', 'sport').get(team_id=id)
+        members_data = []
+        for membership in team.members.select_related('user').all():
+            u = membership.user
+            members_data.append({
+                "user_id": getattr(u, 'id', None),
+                "name": getattr(u, 'name', getattr(u, 'email', '')), 
+                "role": membership.role,
+            })
 
         team_data = {
             "team_id": team.team_id,
             "team_name": team.team_name,
-            "captain": {"user_id": team.captain.user_id, "name": team.captain.name},
+            "captain": {"user_id": getattr(team.captain, 'id', None), "name": getattr(team.captain, 'name', team.captain.email)},
             "sport": {"sport_id": team.sport.sport_id, "sport_name": team.sport.sport_name},
-            "member_count": team.members.count(),
+            # Use len of in-memory list to avoid extra COUNT query
+            "member_count": len(members_data),
             "members": members_data,
             "achievements": [] # Placeholder for achievements
         }
         return Response(team_data, status=status.HTTP_200_OK)
     except Team.DoesNotExist:
         return Response({"message": "Team not found."}, status=status.HTTP_404_NOT_FOUND)
+
+
+# Placeholder endpoints to satisfy URL wiring; implement business logic later
+@api_view(["POST"])
+@permission_classes([permissions.IsAuthenticated])
+def invite_player_to_team(request, id):
+    return Response({"detail": "Invite player to team not implemented yet."}, status=status.HTTP_501_NOT_IMPLEMENTED)
+
+
+@api_view(["POST"])
+@permission_classes([permissions.IsAuthenticated])
+def request_to_join_team(request, id):
+    return Response({"detail": "Request to join team not implemented yet."}, status=status.HTTP_501_NOT_IMPLEMENTED)
+
+
+@api_view(["POST"])
+@permission_classes([permissions.IsAuthenticated])
+def remove_member(request, id):
+    return Response({"detail": "Remove member not implemented yet."}, status=status.HTTP_501_NOT_IMPLEMENTED)
+
+
+@api_view(["POST"])
+@permission_classes([permissions.IsAuthenticated])
+def leave_team(request, id):
+    return Response({"detail": "Leave team not implemented yet."}, status=status.HTTP_501_NOT_IMPLEMENTED)
+
+
+@api_view(["POST"])
+@permission_classes([permissions.IsAuthenticated])
+def invite_team_for_match(request):
+    return Response({"detail": "Invite team for match not implemented yet."}, status=status.HTTP_501_NOT_IMPLEMENTED)
+
+
+@api_view(["POST"])
+@permission_classes([permissions.IsAuthenticated])
+def respond_to_team_invitation(request, id):
+    return Response({"detail": "Respond to team invitation not implemented yet."}, status=status.HTTP_501_NOT_IMPLEMENTED)
+
+
+@api_view(["POST"])
+@permission_classes([permissions.IsAuthenticated])
+def respond_to_join_request(request, id):
+    return Response({"detail": "Respond to join request not implemented yet."}, status=status.HTTP_501_NOT_IMPLEMENTED)
+
+
+@api_view(["POST"])
+@permission_classes([permissions.IsAuthenticated])
+def respond_to_match_invitation(request, id):
+    return Response({"detail": "Respond to match invitation not implemented yet."}, status=status.HTTP_501_NOT_IMPLEMENTED)
