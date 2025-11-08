@@ -4,7 +4,7 @@ from django.db import IntegrityError, transaction
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status, permissions
-from teams.models import Team, Invitation, TeamMember, TeamAchievement
+from teams.models import Team, Invitation, TeamMember
 from bookings.models import Sport
 
 User = get_user_model()

@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from teams.models import Team, TeamMember, Invitation, TeamAchievement
+from teams.models import Team, TeamMember, Invitation
 
 class TeamMemberSerializer(serializers.ModelSerializer):
     user_id = serializers.IntegerField(source='user.id', read_only=True)
@@ -36,11 +36,25 @@ class TeamSerializer(serializers.ModelSerializer):
 class TeamCreateSerializer(serializers.ModelSerializer):
     member_emails = serializers.ListField(child=serializers.EmailField(), write_only=True, required=False)
 
-    achievements = serializers.CharField(max_length=300, required=False, allow_blank=True)
+    achievements = serializers.JSONField(required=False, default=list)
 
     class Meta:
         model = Team
         fields = ["team_name", "sport_id", "member_emails", "achievements"]
+
+    def validate_achievements(self, value):
+        """Validate achievements field - max 2 achievements allowed"""
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Achievements must be a list")
+        if len(value) > 10:
+            raise serializers.ValidationError("Maximum 10 achievements allowed")
+        # Validate each achievement has required fields
+        for achievement in value:
+            if not isinstance(achievement, dict):
+                raise serializers.ValidationError("Each achievement must be an object")
+            if 'title' not in achievement:
+                raise serializers.ValidationError("Each achievement must have a 'title' field")
+        return value
 
     def validate(self, attrs):
         sport_id = attrs.get('sport_id')

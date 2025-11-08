@@ -14,7 +14,11 @@ class Team(models.Model):
     member_count = models.IntegerField(default=0)
     sport = models.ForeignKey(Sport, on_delete=models.PROTECT)
     created_at = models.DateTimeField(default=timezone.now)
-    achievements = models.CharField(max_length=300, blank=True, null=True, help_text="Team achievements (optional)")
+    achievements = models.JSONField(
+        default=list, 
+        blank=True,
+        help_text="Team achievements (max 2). Each achievement should have: title, description, date"
+    )
 
     class Meta:
         db_table = 'teams'
@@ -89,17 +93,6 @@ class Invitation(models.Model):
 
     class Meta:
         db_table = 'invitations'
-
-class TeamAchievement(models.Model):
-    achievement_id = models.AutoField(primary_key=True)
-    team = models.ForeignKey(Team, on_delete=models.CASCADE, related_name='achievement_records')
-    title = models.CharField(max_length=255)
-    description = models.TextField(blank=True, null=True)
-    date_achieved = models.DateField(auto_now_add=True)
-    players = models.ManyToManyField(settings.AUTH_USER_MODEL, related_name='player_achievements', blank=True)
-
-    def __str__(self):
-        return f"{self.team.team_name} - {self.title}"
 
     class Meta:
         db_table = 'team_achievements'
