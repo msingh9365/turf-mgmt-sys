@@ -13,7 +13,7 @@ This document describes the setup, integration, and testing of the push notifica
 
 ---
 
-## 2. Setup
+## 2. Backend Setup
 
 ### Local Development
 - Place your Firebase service account JSON file (e.g. `campus-court-firebase-adminsdk-fbsvc-5a6d8c607a.json`) in the `src/notifications/` directory.
@@ -32,7 +32,244 @@ pip install -r requirements.txt
 
 ---
 
-## 3. API Endpoints
+## 3. Frontend Integration Guide
+
+### Step 1: Firebase Setup in Flutter/Android App
+
+1. **Add Firebase to your Flutter project:**
+   ```yaml
+   # pubspec.yaml
+   dependencies:
+     firebase_core: ^latest_version
+     firebase_messaging: ^latest_version
+   ```
+
+2. **Initialize Firebase in your app:**
+   ```dart
+   import 'package:firebase_core/firebase_core.dart';
+   import 'package:firebase_messaging/firebase_messaging.dart';
+
+   void main() async {
+     WidgetsFlutterBinding.ensureInitialized();
+     await Firebase.initializeApp();
+     runApp(MyApp());
+   }
+   ```
+
+3. **Request notification permissions:**
+   ```dart
+   FirebaseMessaging messaging = FirebaseMessaging.instance;
+   
+   NotificationSettings settings = await messaging.requestPermission(
+     alert: true,
+     badge: true,
+     sound: true,
+   );
+   ```
+
+### Step 2: Get Device Token
+
+After user login, obtain the FCM device token:
+
+```dart
+Future<String?> getFCMToken() async {
+  try {
+    String? token = await FirebaseMessaging.instance.getToken();
+    print("FCM Token: $token");
+    return token;
+  } catch (e) {
+    print("Error getting FCM token: $e");
+    return null;
+  }
+}
+```
+
+### Step 3: Register Device Token with Backend
+
+After successful login and obtaining FCM token, register it with the backend:
+
+```dart
+Future<void> registerDeviceToken(String jwtToken, String fcmToken) async {
+  final url = Uri.parse('https://your-backend-url.com/api/notifications/register/');
+  
+  final response = await http.post(
+    url,
+    headers: {
+      'Authorization': 'Bearer $jwtToken',
+      'Content-Type': 'application/json',
+    },
+    body: jsonEncode({
+      'device_token': fcmToken,
+      'device_type': 'android',
+    }),
+  );
+  
+  if (response.statusCode == 201) {
+    print('Device registered successfully');
+  } else {
+    print('Failed to register device: ${response.body}');
+  }
+}
+```
+
+**When to call this:**
+- After user logs in successfully
+- When FCM token is refreshed (handle token refresh callback)
+
+### Step 4: Handle Incoming Notifications
+
+**Foreground notifications:**
+```dart
+FirebaseMessaging.onMessage.listen((RemoteMessage message) {
+  print('Got a message in foreground!');
+  print('Message data: ${message.data}');
+  
+  if (message.notification != null) {
+    print('Title: ${message.notification!.title}');
+    print('Body: ${message.notification!.body}');
+    
+    // Show local notification or update UI
+    _showLocalNotification(message);
+  }
+  
+  // Handle data payload
+  _handleNotificationData(message.data);
+});
+```
+
+**Background/Terminated notifications:**
+```dart
+FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
+  print('Notification opened app from background');
+  _handleNotificationData(message.data);
+});
+
+// Check if app was opened from terminated state
+FirebaseMessaging.instance.getInitialMessage().then((RemoteMessage? message) {
+  if (message != null) {
+    print('App opened from terminated state');
+    _handleNotificationData(message.data);
+  }
+});
+```
+
+**Handle notification data payload:**
+```dart
+void _handleNotificationData(Map<String, dynamic> data) {
+  String type = data['type'] ?? '';
+  
+  switch (type) {
+    case 'booking_confirmation':
+      String bookingId = data['booking_id'] ?? '';
+      String date = data['date'] ?? '';
+      // Navigate to booking details screen
+      Navigator.pushNamed(context, '/booking-details', arguments: bookingId);
+      break;
+      
+    case 'looking_for_players':
+      String sportId = data['sport_id'] ?? '';
+      String sportName = data['sport_name'] ?? '';
+      String date = data['date'] ?? '';
+      String slotTime = data['slot_time'] ?? '';
+      String userName = data['user_name'] ?? '';
+      String userEmail = data['user_email'] ?? '';
+      
+      // Navigate to sport details or show contact dialog
+      _showLookingForPlayersDialog(sportName, date, slotTime, userName, userEmail);
+      break;
+      
+    default:
+      print('Unknown notification type: $type');
+  }
+}
+```
+
+### Step 5: Fetch Notification History
+
+Retrieve user's notification history:
+
+```dart
+Future<List<Notification>> getNotificationHistory(String jwtToken) async {
+  final url = Uri.parse('https://your-backend-url.com/api/notifications/');
+  
+  final response = await http.get(
+    url,
+    headers: {
+      'Authorization': 'Bearer $jwtToken',
+    },
+  );
+  
+  if (response.statusCode == 200) {
+    List<dynamic> jsonList = jsonDecode(response.body);
+    return jsonList.map((json) => Notification.fromJson(json)).toList();
+  } else {
+    throw Exception('Failed to load notifications');
+  }
+}
+```
+
+### Step 6: Broadcast Looking for Players (Optional)
+
+Allow users to broadcast that they're looking for players:
+
+```dart
+Future<void> broadcastLookingForPlayers({
+  required String jwtToken,
+  required int sportId,
+  required String date,
+  required int slotId,
+}) async {
+  final url = Uri.parse('https://your-backend-url.com/api/notifications/broadcast/looking-for-players/');
+  
+  final response = await http.post(
+    url,
+    headers: {
+      'Authorization': 'Bearer $jwtToken',
+      'Content-Type': 'application/json',
+    },
+    body: jsonEncode({
+      'sport_id': sportId,
+      'date': date,
+      'slot_id': slotId,
+    }),
+  );
+  
+  if (response.statusCode == 200) {
+    var data = jsonDecode(response.body);
+    print('Broadcast sent to ${data['recipients']} users');
+  } else {
+    print('Failed to broadcast: ${response.body}');
+  }
+}
+```
+
+### Step 7: Handle Token Refresh
+
+Firebase tokens can expire or change. Handle token refresh:
+
+```dart
+FirebaseMessaging.instance.onTokenRefresh.listen((newToken) {
+  print('FCM Token refreshed: $newToken');
+  // Register the new token with your backend
+  registerDeviceToken(yourJwtToken, newToken);
+});
+```
+
+### Step 8: Logout - Deactivate Device
+
+When user logs out, you can optionally mark their device as inactive or delete the token:
+
+```dart
+Future<void> deactivateDevice(String jwtToken) async {
+  // Option 1: Call a backend endpoint to mark device inactive
+  // Option 2: Delete FCM token locally
+  await FirebaseMessaging.instance.deleteToken();
+}
+```
+
+---
+
+## 4. API Endpoints
 
 ### Register Device
 `POST /api/notifications/register/`
@@ -304,6 +541,8 @@ pytest src/bookings/tests/test_notifications.py
 ---
 
 ## 6. Troubleshooting
+
+### Backend Issues
 - Ensure the Firebase service account is set up correctly.
 - Check backend logs for errors (notifications are logged extensively).
 - Make sure device tokens are valid and current.
@@ -313,6 +552,40 @@ pytest src/bookings/tests/test_notifications.py
   - Verify Firebase credentials are valid
   - Check application logs for signal errors
 
+### Frontend/Mobile Issues
+- **Notifications not received:**
+  - Verify Firebase is initialized in the app
+  - Check that FCM token was successfully retrieved
+  - Ensure device token was registered with backend (check API response)
+  - Verify notification permissions were granted
+  - Check if the app is in foreground/background (different handlers needed)
+
+- **Token registration fails:**
+  - Ensure JWT token is valid and not expired
+  - Check network connectivity
+  - Verify backend API endpoint URL is correct
+
+- **Data payload not accessible:**
+  - Check `message.data` in notification handler
+  - Ensure you're listening to the correct Firebase events
+  - Verify data structure matches expected format
+
+- **App doesn't open on notification tap:**
+  - Implement `onMessageOpenedApp` listener
+  - Check `getInitialMessage` for terminated state
+  - Verify deep-linking/navigation logic
+
+### Common Integration Issues
+
+**Issue**: Device token keeps changing
+- **Solution**: Implement token refresh listener and re-register with backend
+
+**Issue**: Notifications received but not displayed
+- **Solution**: For foreground notifications, implement local notification display
+
+**Issue**: Can't get user details from notification
+- **Solution**: Access `message.data` object, not just `message.notification`
+
 ---
 
 ## 7. Security Notes
@@ -320,13 +593,58 @@ pytest src/bookings/tests/test_notifications.py
 - Always use environment variables for secrets in production.
 - All notification endpoints require authentication.
 - Notification failures are logged but do not disrupt core functionality.
+- **Frontend**: Never expose JWT tokens in logs or insecure storage.
+- **Frontend**: Store FCM tokens securely on the device.
 
 ---
 
-## 8. References
+## 8. Complete Frontend Integration Checklist
+
+### Initial Setup
+- [ ] Add Firebase dependencies to pubspec.yaml
+- [ ] Initialize Firebase in main.dart
+- [ ] Configure Firebase project with Android app (google-services.json)
+- [ ] Request notification permissions
+
+### Authentication Flow
+- [ ] After successful login, get FCM token
+- [ ] Register FCM token with backend API
+- [ ] Store JWT token securely for API calls
+
+### Notification Handling
+- [ ] Implement foreground notification listener
+- [ ] Implement background notification listener (onMessageOpenedApp)
+- [ ] Implement terminated state handler (getInitialMessage)
+- [ ] Handle data payload and route to appropriate screens
+
+### Token Management
+- [ ] Implement token refresh listener
+- [ ] Re-register new tokens with backend
+- [ ] Delete token on logout
+
+### User Features
+- [ ] Display notification history screen
+- [ ] Implement "Looking for Players" broadcast feature
+- [ ] Handle notification tap navigation
+- [ ] Show unread notification badge/count
+
+### Testing
+- [ ] Test foreground notifications
+- [ ] Test background notifications
+- [ ] Test terminated state notifications
+- [ ] Test deep-linking from notifications
+- [ ] Test token refresh flow
+- [ ] Test logout and token deletion
+
+---
+
+## 9. References
 - [Firebase Admin SDK Python Docs](https://firebase.google.com/docs/admin/setup)
+- [Firebase Cloud Messaging Flutter](https://firebase.google.com/docs/cloud-messaging/flutter/client)
+- [FlutterFire Messaging Package](https://pub.dev/packages/firebase_messaging)
 - [Django REST Framework Docs](https://www.django-rest-framework.org/)
 - [Render Environment Variables](https://render.com/docs/environment-variables)
+- [FCM Data Messages](https://firebase.google.com/docs/cloud-messaging/concept-options#data_messages)
 
 ---
 
