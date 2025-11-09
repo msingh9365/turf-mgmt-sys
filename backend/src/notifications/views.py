@@ -120,22 +120,8 @@ class BroadcastLookingForPlayersView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        # Validate slots exist for the given sport and date
-        # Note: slot_id is not globally unique; uniqueness is (ground, date, slot_id).
-        # We check presence of each requested slot_id across any ground for the sport.
-        existing = set(
-            Slot.objects.filter(
-                slot_id__in=coerced_slot_ids,
-                date=date,
-                ground__sport_id=sport_id,
-            ).values_list('slot_id', flat=True).distinct()
-        )
-        missing = [sid for sid in sorted(set(coerced_slot_ids)) if sid not in existing]
-        if missing:
-            return Response(
-                {'detail': f'Slot(s) not found for given sport/date: {missing}'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+        # No slot validation: slots are only created when booked
+        # We broadcast notifications regardless of slot existence in DB
         
         # Get user details
         user = request.user
@@ -143,8 +129,10 @@ class BroadcastLookingForPlayersView(APIView):
         user_name = getattr(user, 'name', None) or user.email.split('@')[0]
 
         # Format slot time(s) from slot ids
-        slot_times = [self._format_slot_time(sid) for sid in coerced_slot_ids]
-        slot_time_text = ", ".join(slot_times)
+        # Display merged continuous ranges (e.g., "04:30 - 06:00") instead of discrete times
+        slot_ids_sorted = sorted(set(coerced_slot_ids))
+        slot_times = [self._format_slot_time(sid) for sid in slot_ids_sorted]
+        slot_time_text = self._format_slot_range_text(slot_ids_sorted)
 
         # Construct notification message
         title = f"Players Needed for {sport.sport_name}!"
@@ -171,11 +159,11 @@ class BroadcastLookingForPlayersView(APIView):
         results = sender.broadcast(title, body, data, exclude_user=user)
 
         logger.info(
-            "Broadcast sent by user %s for %s on %s at slot %s",
+            "Broadcast sent by user %s for %s on %s at slots %s",
             user.id,
             sport.sport_name,
             date,
-            coerced_slot_ids,
+            slot_ids_sorted,
         )
 
         return Response(
@@ -202,3 +190,45 @@ class BroadcastLookingForPlayersView(APIView):
             return f"{hours:02d}:{minutes:02d}"
         except (ValueError, TypeError):
             return f"Slot {slot_id}"
+
+    def _format_slot_end_time(self, slot_id):
+        """
+        End time for a slot is 30 minutes after its start.
+        """
+        try:
+            slot_num = int(slot_id)
+            total_minutes = slot_num * 30  # end boundary
+            hours = total_minutes // 60
+            minutes = total_minutes % 60
+            # Handle 24:00 for midnight end
+            if hours >= 24:
+                return "24:00"
+            return f"{hours:02d}:{minutes:02d}"
+        except (ValueError, TypeError):
+            return f"Slot {slot_id}"
+
+    def _format_slot_range_text(self, slot_ids):
+        """
+        Given a sorted list of slot_ids, merge continuous sequences into time ranges.
+        Example: [9,10,11] -> "04:00 - 05:30". Multiple ranges will be comma-separated.
+        """
+        if not slot_ids:
+            return ""
+
+        ranges = []
+        start = prev = slot_ids[0]
+        for sid in slot_ids[1:]:
+            if sid == prev + 1:
+                prev = sid
+                continue
+            # close current range
+            ranges.append((start, prev))
+            start = prev = sid
+        ranges.append((start, prev))
+
+        parts = []
+        for s, e in ranges:
+            start_text = self._format_slot_time(s)
+            end_text = self._format_slot_end_time(e)
+            parts.append(f"{start_text} - {end_text}")
+        return ", ".join(parts)
