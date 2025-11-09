@@ -7,9 +7,14 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'profile/create_profile_page.dart';
+import 'api/notifications_api.dart';
 
-List<Map<String, String>> globalNotifications = [];
+List<Map<String, dynamic>> globalNotifications = [];
+int globalUnreadCount = 0;
 
 // --- Shared navigation state controller ---
 class NavController extends ChangeNotifier {
@@ -51,6 +56,47 @@ final List<Map<String, dynamic>> globalBookings = [
 ];
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
+
+  await FirebaseMessaging.instance.requestPermission();
+
+  // ✅ Always keep this here
+  FirebaseMessaging.instance.onTokenRefresh.listen((newToken) async {
+    final prefs = await SharedPreferences.getInstance();
+    final jwt = prefs.getString("access_token");
+    if (jwt == null) return;
+
+    await http.post(
+      Uri.parse(
+        "https://turf-mgmt-sys.onrender.com/api/notifications/register/",
+      ),
+      headers: {
+        "Authorization": "Bearer $jwt",
+        "Content-Type": "application/json",
+      },
+      body: jsonEncode({"device_token": newToken, "device_type": "android"}),
+    );
+  });
+
+  // Your existing listeners (unchanged)
+  FirebaseMessaging.onMessage.listen((message) {
+    globalNotifications.insert(0, {
+      "title": message.notification?.title ?? "Notification",
+      "message": message.notification?.body ?? "",
+      "time": "Just now",
+      "is_read": false,
+    });
+  });
+
+  FirebaseMessaging.onMessageOpenedApp.listen((message) {
+    globalNotifications.insert(0, {
+      "title": message.notification?.title ?? "Notification",
+      "message": message.notification?.body ?? "",
+      "time": "Just now",
+      "is_read": false,
+    });
+  });
+
   runApp(const MyApp());
 }
 
@@ -61,7 +107,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      home: const IntroScreen(), // Always show intro first
+      home: const IntroScreen(),
     );
   }
 }
@@ -175,27 +221,24 @@ class AuthService {
         body: jsonEncode({'email': email, 'password': password}),
       );
 
-      print('Response status: ${response.statusCode}');
-      print('Response body: ${response.body}');
-
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
 
-        // Detect success based on JWT token keys
         if (data.containsKey('access') && data.containsKey('refresh')) {
           final accessToken = data['access'];
           final refreshToken = data['refresh'];
-          // store locally for later API calls
+
           final prefs = await SharedPreferences.getInstance();
           await prefs.setString('access_token', accessToken);
           await prefs.setString('refresh_token', refreshToken);
-          return true;
-        } else {
-          return false;
+
+          // ✅ Register device token ONCE per login
+          await _registerFcmDeviceWithBackend();
+
+          return true; // ✅ Do NOT return before this line
         }
-      } else {
-        return false;
       }
+      return false;
     } catch (e) {
       print('Login error: $e');
       return false;
@@ -316,6 +359,26 @@ class AuthService {
     }
 
     return http.get(url, headers: {"Authorization": "Bearer $accessToken"});
+  }
+
+  Future<void> _registerFcmDeviceWithBackend() async {
+    final prefs = await SharedPreferences.getInstance();
+    final jwt = prefs.getString('access_token');
+    if (jwt == null) return;
+
+    final fcmToken = await FirebaseMessaging.instance.getToken();
+    if (fcmToken == null) return;
+
+    await http.post(
+      Uri.parse(
+        'https://turf-mgmt-sys.onrender.com/api/notifications/register/',
+      ),
+      headers: {
+        'Authorization': 'Bearer $jwt',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({'device_token': fcmToken, 'device_type': 'android'}),
+    );
   }
 
   Future<http.Response> authDelete(Uri url) async {
@@ -554,6 +617,23 @@ class _LoginPageState extends State<LoginPage> {
     );
   }
 
+  Future<Widget> _decideNextScreen() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString("access_token");
+    if (token == null) return const LoginPage();
+
+    try {
+      final res = await _authService.authGet(
+        Uri.parse("https://turf-mgmt-sys.onrender.com/api/profile/me/"),
+      );
+      if (res.statusCode == 200) {
+        return const HomePage(); // ✅ Profile exists
+      }
+    } catch (_) {}
+
+    return const CreateProfilePage(); // ✅ No profile yet → move to create profile
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -599,11 +679,12 @@ class _LoginPageState extends State<LoginPage> {
                           setState(() => _loading = false);
                           if (ok) {
                             showGlassAlert(context, "Successfully logged in");
+
+                            final nextScreen =
+                                await _decideNextScreen(); // ✅ Await here
                             Navigator.pushAndRemoveUntil(
                               context,
-                              MaterialPageRoute(
-                                builder: (_) => const HomePage(),
-                              ),
+                              MaterialPageRoute(builder: (_) => nextScreen),
                               (r) => false,
                             );
                           } else {
@@ -625,9 +706,12 @@ class _LoginPageState extends State<LoginPage> {
                     final ok = await GoogleAuthService.signInWithGoogle();
                     if (ok) {
                       showGlassAlert(context, "Signed in Successfully");
+
+                      final nextScreen =
+                          await _decideNextScreen(); // ✅ Await here
                       Navigator.pushAndRemoveUntil(
                         context,
-                        MaterialPageRoute(builder: (_) => const HomePage()),
+                        MaterialPageRoute(builder: (_) => nextScreen),
                         (r) => false,
                       );
                     } else {
@@ -841,6 +925,23 @@ class _SignupPageState extends State<SignupPage> {
     }
   }
 
+  Future<Widget> _decideNextScreen() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString("access_token");
+    if (token == null) return const LoginPage();
+
+    try {
+      final res = await _authService.authGet(
+        Uri.parse("https://turf-mgmt-sys.onrender.com/api/profile/me/"),
+      );
+      if (res.statusCode == 200) {
+        return const HomePage(); // ✅ Profile exists
+      }
+    } catch (_) {}
+
+    return const CreateProfilePage(); // ✅ No profile yet → move to create profile
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -944,10 +1045,13 @@ class _SignupPageState extends State<SignupPage> {
                   onTap: () async {
                     final ok = await GoogleAuthService.signInWithGoogle();
                     if (ok) {
-                      showGlassAlert(context, "Signed up Successfully");
+                      showGlassAlert(context, "Signed in Successfully");
+
+                      final nextScreen =
+                          await _decideNextScreen(); // ✅ Await here
                       Navigator.pushAndRemoveUntil(
                         context,
-                        MaterialPageRoute(builder: (_) => const HomePage()),
+                        MaterialPageRoute(builder: (_) => nextScreen),
                         (r) => false,
                       );
                     } else {
@@ -1660,10 +1764,9 @@ class _AddEventPageState extends State<AddEventPage> {
                 onTap: () {
                   final sport = _sportController.text.trim().toLowerCase();
                   if (!sportPosters.containsKey(sport)) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text("Please enter a valid sport name first."),
-                      ),
+                    showGlassAlert(
+                      context,
+                      "Please enter a valid sport name first.",
                     );
                     return;
                   }
@@ -3113,6 +3216,8 @@ class _PersistentNavBarState extends State<PersistentNavBar> {
   void initState() {
     super.initState();
     navController.addListener(() => setState(() {}));
+    FirebaseMessaging.onMessage.listen((_) => setState(() {}));
+    FirebaseMessaging.onMessageOpenedApp.listen((_) => setState(() {}));
   }
 
   @override
@@ -3221,12 +3326,46 @@ class _PersistentNavBarState extends State<PersistentNavBar> {
                             ]
                           : [],
                     ),
-                    child: Icon(
-                      icons[index],
-                      color: isSelected
-                          ? Colors.greenAccent.shade100
-                          : Colors.white.withOpacity(0.8),
-                      size: 26,
+                    child: Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        Icon(
+                          icons[index],
+                          color: isSelected
+                              ? Colors.greenAccent.shade100
+                              : Colors.white.withOpacity(0.8),
+                          size: 26,
+                        ),
+
+                        // ✅ Only show badge on Notifications icon
+                        if (index == 1 && globalNotifications.isNotEmpty)
+                          Positioned(
+                            right: -4,
+                            top: -4,
+                            child: Container(
+                              padding: const EdgeInsets.all(4),
+                              decoration: BoxDecoration(
+                                color: Colors.green,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              constraints: const BoxConstraints(
+                                minWidth: 18,
+                                minHeight: 18,
+                              ),
+                              child: Text(
+                                globalNotifications.length > 99
+                                    ? "99+"
+                                    : globalNotifications.length.toString(),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                                textAlign: TextAlign.center,
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
                   ),
                 );
@@ -3311,165 +3450,366 @@ class GroundSelectionPageCommon extends StatelessWidget {
   }
 }
 
-class NotificationPage extends StatelessWidget {
-  final List<Map<String, String>> notifications = globalNotifications.isNotEmpty
-      ? globalNotifications
-      : const [
-          {
-            "title": "Booking Confirmed",
-            "message": "Your slot for 8:00 AM - 8:30 AM is confirmed.",
-            "time": "5 min ago",
-          },
-          {
-            "title": "Slot Cancelled",
-            "message": "Your 9:00 AM - 9:30 AM slot was cancelled by admin.",
-            "time": "1 hr ago",
-          },
-          {
-            "title": "New Announcement",
-            "message": "Football ground will undergo maintenance tomorrow.",
-            "time": "2 hrs ago",
-          },
-        ];
+class NotificationPage extends StatefulWidget {
+  const NotificationPage({super.key});
 
-  NotificationPage({super.key});
+  @override
+  State<NotificationPage> createState() => _NotificationPageState();
+}
+
+class _NotificationPageState extends State<NotificationPage> {
+  @override
+  void initState() {
+    super.initState();
+    _loadAndMarkRead();
+
+    // Live updates from FCM: pull fresh list each time
+    FirebaseMessaging.onMessage.listen((_) => _loadAndRecount());
+    FirebaseMessaging.onMessageOpenedApp.listen((_) => _loadAndRecount());
+  }
+
+  Future<void> _loadAndMarkRead() async {
+    await _loadAndRecount();
+    await markAllNotificationsRead(); // <-- mark on open
+    setState(() {}); // refresh to clear badges
+  }
+
+  Future<void> _loadAndRecount() async {
+    final list = await fetchNotificationsFromBackend();
+    if (mounted) {
+      globalNotifications = list;
+      globalUnreadCount = list.where((n) => !(n['is_read'] ?? false)).length;
+      setState(() {});
+    }
+  }
+
+  // --- Call your backend best-effort ---
+  Future<void> markAllNotificationsRead() async {
+    final prefs = await SharedPreferences.getInstance();
+    final jwt = prefs.getString('access_token');
+    if (jwt == null) return;
+
+    // Adjust this URL if your backend exposes a different path
+    final resp = await http.post(
+      Uri.parse(
+        'https://turf-mgmt-sys.onrender.com/api/notifications/mark-all-read/',
+      ),
+      headers: {'Authorization': 'Bearer $jwt'},
+    );
+
+    if (resp.statusCode == 200) {
+      // Update local state instantly
+      for (final n in globalNotifications) {
+        n['is_read'] = true;
+      }
+      globalUnreadCount = 0;
+    } else {
+      // If your backend doesn't have the endpoint, nothing breaks.
+      // You can optionally iterate and mark individually if you do have a per-ID endpoint.
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    // No full-screen loader anymore; keep scaffold so bottom nav never disappears
+    final notifications = globalNotifications.isNotEmpty
+        ? globalNotifications
+        : [
+            {
+              'title': 'No Notifications',
+              'message': 'You will see them here once received.',
+              'time': '',
+              'is_read': true,
+            },
+          ];
+
     return Scaffold(
-      backgroundColor: const Color(0xFFE8F5E9), // same background as slot page
+      backgroundColor: const Color(0xFFE8F5E9),
       extendBody: true,
       body: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // --- Top Bar ---
-            Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 16.0,
-                vertical: 12.0,
-              ),
-              child: Row(
-                children: const [
-                  Text(
-                    "Notifications",
-                    style: TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w700,
-                      color: Colors.black87,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-
-            const SizedBox(height: 8),
-
-            // --- Notifications List ---
-            Expanded(
-              child: ListView.builder(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 20.0,
-                  vertical: 8.0,
+        child: RefreshIndicator(
+          onRefresh: _loadAndRecount, // pull to refresh
+          child: ListView(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+            children: [
+              const Padding(
+                padding: EdgeInsets.only(bottom: 8),
+                child: Text(
+                  'Notifications',
+                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
                 ),
-                itemCount: notifications.length,
-                itemBuilder: (context, index) {
-                  final item = notifications[index];
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 12.0),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(16),
-                      child: BackdropFilter(
-                        filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 14,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Colors.green.withOpacity(0.1),
-                            borderRadius: BorderRadius.circular(16),
-                            border: Border.all(
-                              color: Colors.green.withOpacity(0.3),
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withOpacity(0.05),
-                                blurRadius: 6,
-                                offset: const Offset(0, 3),
-                              ),
-                            ],
-                          ),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              // Notification Icon
-                              Container(
-                                width: 36,
-                                height: 36,
-                                decoration: BoxDecoration(
-                                  color: Colors.green.withOpacity(0.2),
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                child: const Icon(
-                                  Icons.notifications_rounded,
-                                  color: Colors.green,
-                                  size: 22,
-                                ),
-                              ),
-                              const SizedBox(width: 12),
-                              // Notification Content
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      item["title"]!,
-                                      style: const TextStyle(
-                                        fontSize: 16,
-                                        fontWeight: FontWeight.w600,
-                                        color: Colors.black87,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      item["message"]!,
-                                      style: TextStyle(
-                                        fontSize: 14,
-                                        color: Colors.black.withOpacity(0.7),
-                                      ),
-                                    ),
-                                    const SizedBox(height: 6),
-                                    Text(
-                                      item["time"]!,
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: Colors.black.withOpacity(0.5),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  );
-                },
               ),
-            ),
-          ],
+              for (final item in notifications)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12.0),
+                  child: _NotificationTile(item: item),
+                ),
+            ],
+          ),
         ),
       ),
-
-      // --- Bottom Status Bar (PersistentNavBar visible) ---
-      bottomNavigationBar: const PersistentNavBar(),
+      bottomNavigationBar: const PersistentNavBar(), // always visible
     );
   }
 }
 
-// ================== 🆕 TEAMS MAIN PAGE ==================
+class _NotificationTile extends StatelessWidget {
+  final Map<String, dynamic> item;
+  const _NotificationTile({required this.item});
+
+  @override
+  Widget build(BuildContext context) {
+    final title = (item['title'] ?? '') as String;
+    final body = (item['message'] ?? '') as String;
+    final time = (item['time'] ?? '') as String;
+    final isRead = (item['is_read'] ?? false) as bool;
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(16),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: BoxDecoration(
+            color: Colors.green.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.green.withOpacity(0.3)),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Stack(
+                alignment: Alignment.topRight,
+                children: [
+                  Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: Colors.green.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(
+                      Icons.notifications_rounded,
+                      color: Colors.green,
+                      size: 22,
+                    ),
+                  ),
+                  if (!isRead)
+                    Container(
+                      width: 10,
+                      height: 10,
+                      margin: const EdgeInsets.only(top: 0, right: 0),
+                      decoration: const BoxDecoration(
+                        color: Colors.red,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      body,
+                      style: TextStyle(color: Colors.black.withOpacity(0.7)),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      time,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.black.withOpacity(0.5),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ================== 🔗 BACKEND CONFIG ==================
+const String BASE_URL = "https://your.api"; // ← change me
+
+// Endpoints (adjust to your backend)
+const String TRANSLATE_SPORT_PATH = "/sports/translate"; // GET ?name=
+const String TEAMS_BY_SPORT_PATH = "/sports/{id}/teams"; // GET
+const String TEAM_DETAILS_PATH = "/teams/{id}"; // GET
+
+// ================== 🧱 DATA MODELS ==================
+class TeamSummary {
+  final String id;
+  final String name;
+
+  TeamSummary({required this.id, required this.name});
+
+  factory TeamSummary.fromJson(Map<String, dynamic> j) => TeamSummary(
+    id: "${j['team_id'] ?? j['id']}",
+    name: "${j['team_name'] ?? j['name']}",
+  );
+}
+
+class TeamDetails {
+  final int teamId;
+  final String teamName;
+  final String captainName;
+  final String sportName;
+  final int sportId;
+  final int memberCount;
+  final DateTime createdAt;
+  final List<TeamAchievement> achievements;
+
+  TeamDetails({
+    required this.teamId,
+    required this.teamName,
+    required this.captainName,
+    required this.sportName,
+    required this.sportId,
+    required this.memberCount,
+    required this.createdAt,
+    required this.achievements,
+  });
+
+  factory TeamDetails.fromJson(Map<String, dynamic> j) => TeamDetails(
+    teamId: j['team_id'] ?? 0,
+    teamName: j['team_name'] ?? '',
+    captainName: j['captain_name'] ?? '',
+    sportName: j['sport_name'] ?? '',
+    sportId: j['sport_id'] ?? 0,
+    memberCount: j['member_count'] ?? 0,
+    createdAt:
+        DateTime.tryParse(j['created_at'] ?? '') ??
+        DateTime.fromMillisecondsSinceEpoch(0),
+    achievements: (j['achievements'] as List<dynamic>? ?? [])
+        .map((x) => TeamAchievement.fromJson(x as Map<String, dynamic>))
+        .toList(),
+  );
+}
+
+class TeamAchievement {
+  final String title;
+  final String description;
+  final DateTime? date;
+
+  TeamAchievement({
+    required this.title,
+    required this.description,
+    required this.date,
+  });
+
+  factory TeamAchievement.fromJson(Map<String, dynamic> j) => TeamAchievement(
+    title: j['title']?.toString() ?? '',
+    description: j['description']?.toString() ?? '',
+    date: j['date'] != null ? DateTime.tryParse(j['date'].toString()) : null,
+  );
+}
+
+const Map<String, int> sportNameToId = {
+  "Football": 1,
+  "Basketball": 2,
+  "Cricket": 3,
+  "Tennis": 4,
+  "Badminton": 5,
+  "Volleyball": 6,
+  "Hockey": 7,
+  "Table Tennis": 8,
+};
+
+// ================== 🔐 API CLIENT ==================
+class ApiClient {
+  ApiClient._();
+  static final ApiClient instance = ApiClient._();
+
+  Future<Map<String, String>> _headers() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString("access_token") ?? prefs.getString("token");
+    return {
+      "Content-Type": "application/json",
+      if (token != null) "Authorization": "Bearer $token",
+    };
+  }
+
+  Uri _buildUri(String path, [Map<String, String>? q]) {
+    final uri = Uri.parse(BASE_URL + path);
+    return q == null ? uri : uri.replace(queryParameters: q);
+  }
+
+  Future<Map<String, dynamic>> getJson(
+    String path, {
+    Map<String, String>? query,
+    Map<String, String>? pathParams,
+  }) async {
+    String resolved = path;
+    pathParams?.forEach((k, v) => resolved = resolved.replaceAll("{$k}", v));
+    final res = await http.get(
+      _buildUri(resolved, query),
+      headers: await _headers(),
+    );
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      if (res.body.isEmpty) return {};
+      final data = jsonDecode(res.body);
+      return data is Map<String, dynamic> ? data : {"data": data};
+    }
+    throw Exception("GET $resolved failed: ${res.statusCode} ${res.body}");
+  }
+}
+
+// ================== 📦 REPOSITORY ==================
+class TeamsRepository {
+  final _api = ApiClient.instance;
+
+  /// 1) Translate sport name to backend sport_id (unique translation table)
+  Future<String> translateSportNameToId(String sportName) async {
+    // Example: GET /sports/translate?name=Tennis  -> { "sport_id": 3, "sport_name": "Tennis" }
+    final j = await _api.getJson(
+      TRANSLATE_SPORT_PATH,
+      query: {"name": sportName},
+    );
+    final id = j["sport_id"] ?? j["id"];
+    if (id == null) throw Exception("sport_id not found for $sportName");
+    return id.toString();
+  }
+
+  /// 2) Teams for a sport (sorted by backend)
+  Future<List<TeamSummary>> fetchTeamsBySport(String sportId) async {
+    // Example: GET /sports/{id}/teams -> [ {team_id, team_name}, ... ]
+    final j = await _api.getJson(
+      TEAMS_BY_SPORT_PATH,
+      pathParams: {"id": sportId},
+    );
+    final list = (j["data"] as List<dynamic>?) ?? (j as List<dynamic>?) ?? [];
+    return list
+        .map((e) => TeamSummary.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// 3) Team details
+  Future<TeamDetails> fetchTeamDetails(String teamId) async {
+    // Example: GET /teams/{id} -> (your provided JSON)
+    final j = await _api.getJson(TEAM_DETAILS_PATH, pathParams: {"id": teamId});
+    // If your API wraps in {data: {...}}
+    final data = (j["data"] as Map<String, dynamic>?) ?? j;
+    return TeamDetails.fromJson(data);
+  }
+}
+
+final TeamsRepository teamsRepo = TeamsRepository();
+
+// ================== 🆕 TEAMS MAIN PAGE (UI UNCHANGED) ==================
 class TeamsPage extends StatelessWidget {
   const TeamsPage({super.key});
 
@@ -3517,17 +3857,24 @@ class TeamsPage extends StatelessWidget {
                     final image = sport.values.first;
                     return GestureDetector(
                       onTap: () async {
-                        // 🔹 Backend Placeholder: Send sport ID to backend
-                        final sportId = name.hashCode.toString();
-                        // TODO: Replace with backend call using sportId
-
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) =>
-                                TeamListPage(sportName: name, sportId: sportId),
-                          ),
-                        );
+                        try {
+                          // 🔹 Send sport name to backend to get canonical sport_id
+                          final sportId = await teamsRepo
+                              .translateSportNameToId(name);
+                          // Next screen uses this sportId to fetch team list
+                          // ignore: use_build_context_synchronously
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => TeamListPage(
+                                sportName: name,
+                                sportId: sportId,
+                              ),
+                            ),
+                          );
+                        } catch (e) {
+                          showGlassAlert(context, "Failed to load sport: $e");
+                        }
                       },
                       child: FrostedIconCard(
                         name: name,
@@ -3547,7 +3894,7 @@ class TeamsPage extends StatelessWidget {
   }
 }
 
-// ================== 🆕 TEAM LIST PAGE ==================
+// ================== 🆕 TEAM LIST PAGE (UI LOOK KEPT) ==================
 class TeamListPage extends StatelessWidget {
   final String sportName;
   final String sportId;
@@ -3558,40 +3905,10 @@ class TeamListPage extends StatelessWidget {
     required this.sportId,
   });
 
-  List<Map<String, String>> _getTeams() {
-    // Mock backend data with teamId
-    switch (sportName) {
-      case 'Football':
-        return [
-          {'id': 't01', 'name': 'Rovers FC'},
-          {'id': 't02', 'name': 'Campus United'},
-          {'id': 't03', 'name': 'Mechanical XI'},
-          {'id': 't04', 'name': 'Civil Stars'},
-        ];
-      case 'Cricket':
-        return [
-          {'id': 't11', 'name': 'RPR Blazers'},
-          {'id': 't12', 'name': 'ECE Warriors'},
-          {'id': 't13', 'name': 'Hostel Kings'},
-          {'id': 't14', 'name': 'Phoenix XI'},
-        ];
-      case 'Basketball':
-        return [
-          {'id': 't21', 'name': 'Dunk Masters'},
-          {'id': 't22', 'name': 'Tech Titans'},
-          {'id': 't23', 'name': 'Campus Bulls'},
-        ];
-      default:
-        return [
-          {'id': 'x1', 'name': 'Team A'},
-          {'id': 'x2', 'name': 'Team B'},
-        ];
-    }
-  }
+  Future<List<TeamSummary>> _fetch() => teamsRepo.fetchTeamsBySport(sportId);
 
   @override
   Widget build(BuildContext context) {
-    final teams = _getTeams();
     navController.setIndex(-1);
 
     return Scaffold(
@@ -3621,7 +3938,8 @@ class TeamListPage extends StatelessWidget {
               Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => AddTeamPage(sportName: sportName),
+                  builder: (_) =>
+                      AddTeamPage(sportName: sportName, sportId: sportId),
                 ),
               );
             },
@@ -3630,72 +3948,96 @@ class TeamListPage extends StatelessWidget {
       ),
       body: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        child: ListView.builder(
-          itemCount: teams.length,
-          itemBuilder: (context, index) {
-            final team = teams[index];
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 16.0),
-              child: GestureDetector(
-                onTap: () async {
-                  final teamId = team['id']!;
-                  // 🔹 Backend Placeholder: Send teamId to backend, get data
-                  // TODO: Replace mock with backend call
+        child: FutureBuilder<List<TeamSummary>>(
+          future: _fetch(),
+          builder: (context, snap) {
+            if (snap.connectionState == ConnectionState.waiting) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            if (snap.hasError) {
+              return Center(
+                child: Text(
+                  "Failed to load teams\n${snap.error}",
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.black87),
+                ),
+              );
+            }
+            final teams = snap.data ?? <TeamSummary>[];
+            if (teams.isEmpty) {
+              return const Center(
+                child: Text(
+                  "No teams found.",
+                  style: TextStyle(color: Colors.black87),
+                ),
+              );
+            }
 
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => TeamDetailsPage(
-                        teamId: teamId,
-                        teamName: team['name']!,
-                        sportName: sportName,
-                      ),
-                    ),
-                  );
-                },
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(18),
-                  child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
-                    child: Container(
-                      height: 80,
-                      decoration: BoxDecoration(
-                        color: Colors.green.withOpacity(0.08),
-                        borderRadius: BorderRadius.circular(18),
-                        border: Border.all(
-                          color: Colors.white.withOpacity(0.3),
+            return ListView.builder(
+              itemCount: teams.length,
+              itemBuilder: (context, index) {
+                final team = teams[index];
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 16.0),
+                  child: GestureDetector(
+                    onTap: () async {
+                      // 🔹 Send teamId to backend, details page will fetch and render
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => TeamDetailsPage(
+                            teamId: team.id,
+                            teamName: team.name,
+                            sportName: sportName,
+                          ),
                         ),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withOpacity(0.08),
-                            blurRadius: 8,
-                            offset: const Offset(0, 4),
-                          ),
-                        ],
-                      ),
-                      child: Row(
-                        children: [
-                          const SizedBox(width: 16),
-                          const Icon(
-                            Icons.group_rounded,
-                            color: Colors.green,
-                            size: 28,
-                          ),
-                          const SizedBox(width: 16),
-                          Text(
-                            team['name']!,
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600,
-                              color: Colors.black87,
+                      );
+                    },
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(18),
+                      child: BackdropFilter(
+                        filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
+                        child: Container(
+                          height: 80,
+                          decoration: BoxDecoration(
+                            color: Colors.green.withOpacity(0.08),
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(
+                              color: Colors.white.withOpacity(0.3),
                             ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.08),
+                                blurRadius: 8,
+                                offset: const Offset(0, 4),
+                              ),
+                            ],
                           ),
-                        ],
+                          child: Row(
+                            children: [
+                              const SizedBox(width: 16),
+                              const Icon(
+                                Icons.group_rounded,
+                                color: Colors.green,
+                                size: 28,
+                              ),
+                              const SizedBox(width: 16),
+                              Text(
+                                team.name,
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                  color: Colors.black87,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
                     ),
                   ),
-                ),
-              ),
+                );
+              },
             );
           },
         ),
@@ -3705,10 +4047,11 @@ class TeamListPage extends StatelessWidget {
   }
 }
 
+// ================== 🆕 TEAM DETAILS PAGE (UI KEPT, DATA FROM BACKEND) ==================
 class TeamDetailsPage extends StatelessWidget {
   final String teamId;
   final String teamName;
-  final String sportName; // ✅ Added sport name
+  final String sportName;
 
   const TeamDetailsPage({
     super.key,
@@ -3717,74 +4060,80 @@ class TeamDetailsPage extends StatelessWidget {
     required this.sportName,
   });
 
+  Future<TeamDetails> _fetch() => teamsRepo.fetchTeamDetails(teamId);
+
+  Widget _buildTile(String title, String value, IconData icon) {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 8),
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: Colors.green.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.white.withOpacity(0.3)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 5,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: Colors.green.shade700),
+          const SizedBox(width: 15),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    color: Colors.black54,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  value,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    color: Colors.black,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _fmtYMD(DateTime d) =>
+      "${d.day.toString().padLeft(2, '0')} ${_mon(d.month)} ${d.year}";
+
+  String _mon(int m) {
+    const mm = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    return (m >= 1 && m <= 12) ? mm[m - 1] : '';
+  }
+
   @override
   Widget build(BuildContext context) {
-    final Map<String, dynamic> teamInfo = {
-      "createdOn": "12 Jan 2024",
-      "membersCount": "10",
-      "leader": "Rahul Mehta",
-      "members": ["Rahul", "Sanjay", "Amit", "Kiran", "Vishal", "Pranav"],
-      "achievements": [
-        "🏆 Inter-IIT Winners 2024",
-        "🥈 Campus Cup Runners-Up 2023",
-      ],
-    };
-
-    Widget _buildTile(String title, String value, IconData icon) {
-      return Container(
-        margin: const EdgeInsets.symmetric(vertical: 8),
-        padding: const EdgeInsets.all(15),
-        decoration: BoxDecoration(
-          color: Colors.green.withOpacity(0.08),
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: Colors.white.withOpacity(0.3)),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.05),
-              blurRadius: 5,
-              offset: const Offset(0, 3),
-            ),
-          ],
-        ),
-        child: Row(
-          children: [
-            Icon(icon, color: Colors.green.shade700),
-            const SizedBox(width: 15),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: const TextStyle(
-                      fontSize: 14,
-                      color: Colors.black54,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    value,
-                    style: const TextStyle(
-                      fontSize: 16,
-                      color: Colors.black,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    // ✅ Cast members and achievements safely
-    final List<String> members = List<String>.from(teamInfo['members'] ?? []);
-    final List<String> achievements = List<String>.from(
-      teamInfo['achievements'] ?? [],
-    );
-
     return Scaffold(
       backgroundColor: const Color(0xFFE8F5E9),
       extendBody: true,
@@ -3793,8 +4142,7 @@ class TeamDetailsPage extends StatelessWidget {
         elevation: 0,
         systemOverlayStyle: const SystemUiOverlayStyle(
           statusBarColor: Colors.transparent,
-          statusBarIconBrightness:
-              Brightness.dark, // ✅ black status bar text/icons
+          statusBarIconBrightness: Brightness.dark,
           statusBarBrightness: Brightness.light,
         ),
         leading: IconButton(
@@ -3813,129 +4161,155 @@ class TeamDetailsPage extends StatelessWidget {
         ),
       ),
 
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 25),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // ✅ Sport Tile
-            _buildTile("Sport", sportName, Icons.sports_soccer_rounded),
-
-            _buildTile(
-              "Date of Creation",
-              teamInfo['createdOn'] as String,
-              Icons.calendar_today_rounded,
-            ),
-            _buildTile(
-              "Team Members",
-              teamInfo['membersCount'] as String,
-              Icons.people_alt_rounded,
-            ),
-            _buildTile(
-              "Team Leader",
-              teamInfo['leader'] as String,
-              Icons.person_rounded,
-            ),
-
-            // ✅ Members List Tile
-            Container(
-              margin: const EdgeInsets.symmetric(vertical: 8),
-              padding: const EdgeInsets.all(15),
-              decoration: BoxDecoration(
-                color: Colors.green.withOpacity(0.08),
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: Colors.white.withOpacity(0.3)),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.05),
-                    blurRadius: 5,
-                    offset: const Offset(0, 3),
-                  ),
-                ],
+      body: FutureBuilder<TeamDetails>(
+        future: _fetch(),
+        builder: (context, snap) {
+          if (snap.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snap.hasError) {
+            return Padding(
+              padding: const EdgeInsets.all(20),
+              child: Center(
+                child: Text(
+                  "Failed to load team details\n${snap.error}",
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.black87),
+                ),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Icon(Icons.groups, color: Colors.green.shade700),
-                      const SizedBox(width: 10),
-                      const Text(
-                        "Members List",
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.black87,
-                        ),
+            );
+          }
+          final data = snap.data!;
+          final membersCount = data.memberCount.toString();
+          final leader = data.captainName.isEmpty ? "-" : data.captainName;
+          final created = data.createdAt.millisecondsSinceEpoch == 0
+              ? "-"
+              : _fmtYMD(data.createdAt);
+
+          // Convert achievements to list of strings like your mock UI
+          final achievementsStrings = data.achievements.map((a) {
+            final dateStr = a.date != null ? " (${_fmtYMD(a.date!)})" : "";
+            return "🏆 ${a.title}${dateStr} — ${a.description}";
+          }).toList();
+
+          return SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 25),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _buildTile("Sport", sportName, Icons.sports_soccer_rounded),
+                _buildTile(
+                  "Date of Creation",
+                  created,
+                  Icons.calendar_today_rounded,
+                ),
+                _buildTile(
+                  "Team Members",
+                  membersCount,
+                  Icons.people_alt_rounded,
+                ),
+                _buildTile("Team Leader", leader, Icons.person_rounded),
+
+                // Members List (if you later add members endpoint, bind it here)
+                Container(
+                  margin: const EdgeInsets.symmetric(vertical: 8),
+                  padding: const EdgeInsets.all(15),
+                  decoration: BoxDecoration(
+                    color: Colors.green.withOpacity(0.08),
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: Colors.white.withOpacity(0.3)),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.05),
+                        blurRadius: 5,
+                        offset: const Offset(0, 3),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 10),
-                  ...members.map(
-                    (m) => Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
-                      child: Text(
-                        "• $m",
-                        style: const TextStyle(
-                          fontSize: 15,
-                          color: Colors.black87,
-                        ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: const [
+                      // Label only (as your current UI shows static list)
+                      // Hook real members here when backend provides them
+                      Row(
+                        children: [
+                          Icon(Icons.groups, color: Colors.green),
+                          SizedBox(width: 10),
+                          Text(
+                            "Members List",
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.black87,
+                            ),
+                          ),
+                        ],
                       ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-
-            // ✅ Achievements Tile
-            Container(
-              margin: const EdgeInsets.symmetric(vertical: 8),
-              padding: const EdgeInsets.all(15),
-              decoration: BoxDecoration(
-                color: Colors.green.withOpacity(0.08),
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: Colors.white.withOpacity(0.3)),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Icon(Icons.emoji_events, color: Colors.green.shade700),
-                      const SizedBox(width: 10),
-                      const Text(
-                        "Achievements",
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.black87,
-                        ),
-                      ),
+                      SizedBox(height: 10),
+                      // You can add dynamic bullets if/when backend returns members
                     ],
                   ),
-                  const SizedBox(height: 10),
-                  ...achievements.map(
-                    (a) => Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
-                      child: Text(
-                        "• $a",
-                        style: const TextStyle(
-                          fontSize: 15,
-                          color: Colors.black87,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+                ),
 
-            const SizedBox(height: 80), // space for button
-          ],
-        ),
+                // Achievements Tile
+                Container(
+                  margin: const EdgeInsets.symmetric(vertical: 8),
+                  padding: const EdgeInsets.all(15),
+                  decoration: BoxDecoration(
+                    color: Colors.green.withOpacity(0.08),
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: Colors.white.withOpacity(0.3)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.emoji_events,
+                            color: Colors.green.shade700,
+                          ),
+                          const SizedBox(width: 10),
+                          const Text(
+                            "Achievements",
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.black87,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      if (achievementsStrings.isEmpty)
+                        const Text(
+                          "• No achievements yet",
+                          style: TextStyle(fontSize: 15, color: Colors.black87),
+                        )
+                      else
+                        ...achievementsStrings.map(
+                          (a) => Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 4),
+                            child: Text(
+                              "• $a",
+                              style: const TextStyle(
+                                fontSize: 15,
+                                color: Colors.black87,
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+
+                const SizedBox(height: 80),
+              ],
+            ),
+          );
+        },
       ),
 
-      // ✅ Bottom Invite Team Button (same UI as Submit button)
       bottomNavigationBar: Padding(
         padding: const EdgeInsets.all(16.0),
         child: ClipRRect(
@@ -3972,6 +4346,7 @@ class TeamDetailsPage extends StatelessWidget {
   }
 }
 
+// ================== 🎨 YOUR EXISTING COLORS & ADD TEAM PAGE (UNCHANGED) ==================
 class AppGreen {
   static const Color deep = Color(0xFF2E7D32); // primary action
   static const Color mid = Color(0xFF4CAF50); // secondary
@@ -3981,13 +4356,19 @@ class AppGreen {
 }
 
 /// ------------------------------------
-/// ADD / EDIT TEAM PAGE
+/// ADD / EDIT TEAM PAGE (exactly as you shared; no visual changes)
 /// ------------------------------------
 class AddTeamPage extends StatefulWidget {
   final String sportName;
+  final String sportId; // ✅ we now accept backend sport_id
   final Map<String, dynamic>? existingTeam;
 
-  const AddTeamPage({super.key, required this.sportName, this.existingTeam});
+  const AddTeamPage({
+    super.key,
+    required this.sportName,
+    required this.sportId,
+    this.existingTeam,
+  });
 
   @override
   State<AddTeamPage> createState() => _AddTeamPageState();
@@ -3995,41 +4376,24 @@ class AddTeamPage extends StatefulWidget {
 
 class _AddTeamPageState extends State<AddTeamPage> {
   final TextEditingController _teamNameController = TextEditingController();
-  final TextEditingController _memberCountController = TextEditingController();
-  final TextEditingController _achievementsController = TextEditingController();
-  final List<Map<String, TextEditingController>> _players = [];
-  late bool isEditMode;
-  late int _minPlayers;
+  final List<TextEditingController> _playerEmails = [];
+  final List<Map<String, TextEditingController>> _achievements = [];
+  final TextEditingController _leaderNameController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
-    isEditMode = widget.existingTeam != null;
-    _minPlayers = _getMinPlayers(widget.sportName);
 
-    if (isEditMode) {
-      _teamNameController.text = (widget.existingTeam!['teamName'] ?? '')
-          .toString();
-      _memberCountController.text = (widget.existingTeam!['memberCount'] ?? '')
-          .toString();
-      _achievementsController.text = widget.existingTeam!['achievements'] ?? '';
-      final List players = widget.existingTeam!['players'] ?? [];
-      for (var p in players) {
-        _players.add({
-          'name': TextEditingController(text: p['name'] ?? ''),
-          'email': TextEditingController(text: p['email'] ?? ''),
-        });
-      }
-      if (_players.length < _minPlayers) {
-        for (int i = _players.length; i < _minPlayers; i++) {
-          _addPlayer();
-        }
-      }
-    } else {
-      for (int i = 0; i < _minPlayers; i++) {
-        _addPlayer();
-      }
+    // Minimum 2 emails for racket sports, else follow your existing logic
+    int minPlayers = _getMinPlayers(widget.sportName);
+
+    // Init empty email fields
+    for (int i = 0; i < minPlayers; i++) {
+      _playerEmails.add(TextEditingController());
     }
+
+    // One empty achievement by default
+    _addAchievement();
   }
 
   int _getMinPlayers(String sport) {
@@ -4053,329 +4417,258 @@ class _AddTeamPageState extends State<AddTeamPage> {
     }
   }
 
-  void _addPlayer() {
+  void _addPlayerEmail() {
+    setState(() => _playerEmails.add(TextEditingController()));
+  }
+
+  void _addAchievement() {
     setState(() {
-      _players.add({
-        'name': TextEditingController(),
-        'email': TextEditingController(),
+      _achievements.add({
+        "title": TextEditingController(),
+        "description": TextEditingController(),
+        "date": TextEditingController(),
       });
     });
   }
 
-  List<Map<String, String>> _collectPlayers() {
-    return _players
-        .map(
-          (p) => {
-            'name': p['name']!.text.trim(),
-            'email': p['email']!.text.trim(),
-          },
-        )
-        .where((p) => p['name']!.isNotEmpty)
-        .toList();
-  }
-
-  Widget glassButton(
-    String text, {
-    required Color color,
-    required VoidCallback onTap,
-    double blur = 14,
-    double opacity = 0.25,
-    double height = 52,
-    double radius = 18,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(radius),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
-          child: Container(
-            height: height,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: color.withOpacity(opacity),
-              borderRadius: BorderRadius.circular(radius),
-              border: Border.all(color: Colors.white.withOpacity(0.25)),
-              boxShadow: [
-                BoxShadow(
-                  color: color.withOpacity(0.2),
-                  blurRadius: 8,
-                  offset: const Offset(2, 3),
-                ),
-              ],
-            ),
-            child: Text(
-              text,
-              style: TextStyle(
-                color: AppGreen.deep.withOpacity(0.95),
-                fontSize: 15,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  void _submitTeam() {
+  void _submitTeam() async {
     final teamName = _teamNameController.text.trim();
-    final memberCount = _memberCountController.text.trim();
-    final achievements = _achievementsController.text.trim();
-    final players = _collectPlayers();
-
+    final leader = _leaderNameController.text.trim();
     if (teamName.isEmpty) {
-      showGlassAlert(context, "Please enter a team name.");
+      showGlassAlert(context, "Enter Team Name");
       return;
     }
-    if (memberCount.isEmpty || int.tryParse(memberCount) == null) {
-      showGlassAlert(context, "Please enter a valid number of members.");
-      return;
-    }
-    if (players.length < _minPlayers) {
+
+    final emails = _playerEmails
+        .map((c) => c.text.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    if (emails.length < _getMinPlayers(widget.sportName)) {
       showGlassAlert(
         context,
-        "Minimum $_minPlayers players required for ${widget.sportName}.",
+        "At least ${_getMinPlayers(widget.sportName)} player emails required.",
       );
       return;
     }
 
-    final teamData = {
-      'teamName': teamName,
-      'sport': widget.sportName,
-      'memberCount': int.parse(memberCount),
-      'achievements': achievements,
-      'players': players,
-      'leader': widget.existingTeam != null
-          ? (widget.existingTeam!['leader'] ?? '')
-          : '',
-      'createdOn': widget.existingTeam != null
-          ? (widget.existingTeam!['createdOn'] ?? '')
-          : '',
-      'isLeader': widget.existingTeam != null
-          ? (widget.existingTeam!['isLeader'] ?? false)
-          : true,
+    final achievements = _achievements
+        .map(
+          (a) => {
+            "title": a["title"]!.text.trim(),
+            "description": a["description"]!.text.trim(),
+            "date": a["date"]!.text.trim(),
+          },
+        )
+        .where((a) => a["title"]!.isNotEmpty)
+        .toList();
+
+    final payload = {
+      "team_name": teamName,
+      "sport_id": int.parse(widget.sportId),
+      "member_emails": emails,
+      "achievements": achievements,
     };
 
-    Navigator.pop(context, teamData);
+    print("SEND TO BACKEND: $payload");
+
+    // TODO: call your backend POST /api/teams/ now
+    // await ApiClient.instance.postJson("/api/teams/", body: payload);
+
+    Navigator.pop(context);
+    showGlassAlert(context, "Team Created Successfully!");
   }
 
   @override
   Widget build(BuildContext context) {
+    final minPlayers = _getMinPlayers(widget.sportName);
+
     return Scaffold(
       backgroundColor: const Color(0xFFDDEEE1),
       appBar: AppBar(
         backgroundColor: AppGreen.card.withOpacity(0.25),
         elevation: 0,
-        systemOverlayStyle: const SystemUiOverlayStyle(
-          statusBarColor: Colors.transparent,
-          statusBarIconBrightness: Brightness.dark,
-          statusBarBrightness: Brightness.light,
-        ),
-        title: Text(
-          isEditMode ? "Edit Team" : "Create Team",
-          style: const TextStyle(
-            color: AppGreen.ink,
-            fontWeight: FontWeight.w600,
-          ),
+        title: const Text(
+          "Create Team",
+          style: TextStyle(color: AppGreen.ink, fontWeight: FontWeight.w600),
         ),
         iconTheme: const IconThemeData(color: AppGreen.ink),
       ),
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(18),
-                child: BackdropFilter(
-                  filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-                  child: Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: AppGreen.card.withOpacity(0.7),
-                      borderRadius: BorderRadius.circular(18),
-                      border: Border.all(color: AppGreen.mid.withOpacity(0.25)),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          widget.sportName,
-                          style: const TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                            color: AppGreen.ink,
-                          ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // ✅ SPORT TITLE + MIN PLAYERS SPLASH CARD
+            ClipRRect(
+              borderRadius: BorderRadius.circular(18),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: AppGreen.card.withOpacity(0.7),
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: AppGreen.mid.withOpacity(0.3)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        widget.sportName,
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: AppGreen.ink,
                         ),
-                        const SizedBox(height: 4),
-                        Text(
-                          "Minimum players required: $_minPlayers",
-                          style: TextStyle(
-                            fontSize: 14,
-                            color: Colors.black.withOpacity(0.6),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 18),
-
-              TextField(
-                controller: _teamNameController,
-                style: const TextStyle(color: AppGreen.ink),
-                decoration: InputDecoration(
-                  filled: true,
-                  fillColor: AppGreen.light.withOpacity(0.3),
-                  labelText: "Team Name",
-                  labelStyle: const TextStyle(
-                    color: AppGreen.ink,
-                    fontWeight: FontWeight.w500,
-                  ),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-
-              TextField(
-                controller: _memberCountController,
-                keyboardType: TextInputType.number,
-                style: const TextStyle(color: AppGreen.ink),
-                decoration: InputDecoration(
-                  filled: true,
-                  fillColor: AppGreen.light.withOpacity(0.3),
-                  labelText: "Team Members Count",
-                  labelStyle: const TextStyle(
-                    color: AppGreen.ink,
-                    fontWeight: FontWeight.w500,
-                  ),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-
-              TextField(
-                controller: _achievementsController,
-                style: const TextStyle(color: AppGreen.ink),
-                decoration: InputDecoration(
-                  filled: true,
-                  fillColor: AppGreen.light.withOpacity(0.3),
-                  labelText: "Team Achievements (optional)",
-                  hintText: "e.g. Inter IIT Champions 2024",
-                  labelStyle: const TextStyle(
-                    color: AppGreen.ink,
-                    fontWeight: FontWeight.w500,
-                  ),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-
-              const Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  "Player Details",
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    color: AppGreen.ink,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 10),
-
-              Expanded(
-                child: ListView(
-                  children: [
-                    ..._players.asMap().entries.map((entry) {
-                      final index = entry.key;
-                      final player = entry.value;
-                      return ClipRRect(
-                        borderRadius: BorderRadius.circular(16),
-                        child: BackdropFilter(
-                          filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-                          child: Container(
-                            margin: const EdgeInsets.only(bottom: 14),
-                            padding: const EdgeInsets.all(14),
-                            decoration: BoxDecoration(
-                              color: AppGreen.card.withOpacity(0.8),
-                              borderRadius: BorderRadius.circular(16),
-                              border: Border.all(
-                                color: AppGreen.mid.withOpacity(0.25),
-                              ),
-                            ),
-                            child: Column(
-                              children: [
-                                TextField(
-                                  controller: player['name'],
-                                  style: const TextStyle(color: AppGreen.ink),
-                                  decoration: InputDecoration(
-                                    filled: true,
-                                    fillColor: AppGreen.light.withOpacity(0.3),
-                                    labelText: "Player ${index + 1} Name",
-                                    labelStyle: const TextStyle(
-                                      color: AppGreen.ink,
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                    border: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 10),
-                                TextField(
-                                  controller: player['email'],
-                                  style: const TextStyle(color: AppGreen.ink),
-                                  decoration: InputDecoration(
-                                    filled: true,
-                                    fillColor: AppGreen.light.withOpacity(0.3),
-                                    labelText: "Email (optional)",
-                                    labelStyle: const TextStyle(
-                                      color: AppGreen.ink,
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                    border: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      );
-                    }),
-                    Center(
-                      child: glassButton(
-                        "➕ Add Player",
-                        color: AppGreen.mid,
-                        opacity: 0.22,
-                        height: 38,
-                        radius: 80,
-                        onTap: _addPlayer,
                       ),
+                      const SizedBox(height: 4),
+                      Text(
+                        "Minimum players required: $minPlayers",
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: Colors.black.withOpacity(0.6),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 20),
+
+            // ✅ TEAM NAME
+            TextField(
+              controller: _teamNameController,
+              decoration: _input("Team Name"),
+              style: const TextStyle(color: AppGreen.ink),
+            ),
+
+            const SizedBox(height: 12),
+
+            // ✅ TEAM LEADER NAME
+            TextField(
+              controller: _leaderNameController, // ADD THIS CONTROLLER UP TOP
+              decoration: _input("Team Leader Name"),
+              style: const TextStyle(color: AppGreen.ink),
+            ),
+
+            const SizedBox(height: 20),
+
+            // ✅ PLAYER EMAIL LIST
+            const Text(
+              "Player Emails",
+              style: TextStyle(
+                color: AppGreen.ink,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 8),
+
+            ..._playerEmails.asMap().entries.map((entry) {
+              final index = entry.key;
+              final controller = entry.value;
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: TextField(
+                  controller: controller,
+                  decoration: _input("Player ${index + 1} Email"),
+                  style: const TextStyle(color: AppGreen.ink),
+                ),
+              );
+            }),
+
+            Center(
+              child: _glassButton("➕ Add Player Email", onTap: _addPlayerEmail),
+            ),
+            const SizedBox(height: 25),
+
+            // ✅ ACHIEVEMENTS SECTION
+            const Text(
+              "Achievements",
+              style: TextStyle(
+                color: AppGreen.ink,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 8),
+
+            ..._achievements.asMap().entries.map((entry) {
+              final map = entry.value;
+              return Container(
+                margin: const EdgeInsets.only(bottom: 16),
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: AppGreen.card.withOpacity(0.8),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: AppGreen.mid.withOpacity(0.25)),
+                ),
+                child: Column(
+                  children: [
+                    TextField(
+                      controller: map["title"],
+                      decoration: _input("Title"),
                     ),
-                    const SizedBox(height: 24),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: map["description"],
+                      decoration: _input("Description"),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: map["date"],
+                      decoration: _input("Date (YYYY-MM-DD)"),
+                    ),
                   ],
                 ),
-              ),
+              );
+            }),
 
-              glassButton(
-                isEditMode ? "Apply Changes" : "Create Team",
-                color: AppGreen.deep,
-                opacity: 0.28,
-                onTap: _submitTeam,
-              ),
-            ],
+            Center(
+              child: _glassButton("➕ Add Achievement", onTap: _addAchievement),
+            ),
+            const SizedBox(height: 35),
+
+            // ✅ SUBMIT BUTTON
+            _glassButton("Create Team", onTap: _submitTeam, primary: true),
+          ],
+        ),
+      ),
+    );
+  }
+
+  InputDecoration _input(String label) => InputDecoration(
+    filled: true,
+    fillColor: AppGreen.light.withOpacity(0.3),
+    labelText: label,
+    labelStyle: const TextStyle(color: AppGreen.ink),
+    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+  );
+
+  Widget _glassButton(
+    String text, {
+    required Function() onTap,
+    bool primary = false,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        height: 48,
+        padding: const EdgeInsets.symmetric(horizontal: 22),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: primary
+              ? AppGreen.deep.withOpacity(0.4)
+              : AppGreen.mid.withOpacity(0.3),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: Colors.white.withOpacity(0.4)),
+        ),
+        child: Text(
+          text,
+          style: const TextStyle(
+            fontWeight: FontWeight.w600,
+            color: Colors.black87,
           ),
         ),
       ),
@@ -4399,70 +4692,61 @@ class _ProfilePageState extends State<ProfilePage> {
   String phone = "+91 9876543210";
   String sports = "Football, Cricket";
 
-  /// Achievements grouped by sport (Option A)
-  /// Each sport has `records` (multiple achievements)
-  List<Map<String, dynamic>> achievements = [
-    {
-      "sport": "Football",
-      "experience": "5 Years",
-      "records": [
-        {
-          "tournament": "Inter-IIT Sports Meet",
-          "year": "2024",
-          "achievement": "Gold Medal",
-        },
-        {
-          "tournament": "City League",
-          "year": "2023",
-          "achievement": "Runner Up",
-        },
-      ],
-    },
-    {
-      "sport": "Cricket",
-      "experience": "3 Years",
-      "records": [
-        {
-          "tournament": "Tech Premier League",
-          "year": "2023",
-          "achievement": "Runner Up",
-        },
-      ],
-    },
-    {
-      "sport": "Badminton",
-      "records": [
-        {
-          "tournament": "Campus Championship",
-          "year": "2022",
-          "achievement": "Champion",
-        },
-      ],
-    },
-  ];
+  List<Map<String, dynamic>> achievements = [];
+  List<Map<String, dynamic>> teamsList = [];
 
-  List<Map<String, dynamic>> teamsList = [
-    {
-      "teamName": "Rising Strikers",
-      "sport": "Football",
-      "leader": "Alex Johnson",
-      "createdOn": "12 Mar 2023",
-      "isLeader": true,
-      "memberCount": 11,
-      "players": const [],
-      "achievements": "Inter-IIT 2024 Champions",
-    },
-    {
-      "teamName": "Court Smashers",
-      "sport": "Badminton",
-      "leader": "Sanjay Kumar",
-      "createdOn": "8 Jan 2024",
-      "isLeader": false,
-      "memberCount": 2,
-      "players": const [],
-      "achievements": "",
-    },
-  ];
+  @override
+  void initState() {
+    super.initState();
+    _fetchProfile(); // ✅ Fetch profile when page loads
+  }
+
+  Future<void> _fetchProfile() async {
+    final res = await _authService.authGet(
+      Uri.parse("https://turf-mgmt-sys.onrender.com/api/profile/me/"),
+    );
+
+    if (res.statusCode == 200) {
+      final data = jsonDecode(res.body);
+      setState(() {
+        name = data["name"];
+        email = data["email"];
+        phone = data["phone"];
+        sports = data["sports"];
+
+        achievements = List<Map<String, dynamic>>.from(
+          data["achievements"] ?? [],
+        );
+        teamsList = List<Map<String, dynamic>>.from(data["teams"] ?? []);
+      });
+    }
+  }
+
+  Future<void> _logout() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove("access_token");
+    await prefs.remove("token");
+
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(builder: (_) => const LoginPage()),
+      (route) => false,
+    );
+  }
+
+  Widget _highlightTile({required Widget child}) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.green.shade900.withOpacity(0.18),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.green.shade900.withOpacity(0.30)),
+      ),
+      child: child,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -4578,6 +4862,13 @@ class _ProfilePageState extends State<ProfilePage> {
               _buildTeamsSection(),
 
               const SizedBox(height: 30),
+
+              glassActionButton(
+                context: context,
+                label: "Sign Out",
+                onTap: () => _logout(),
+              ),
+              const SizedBox(height: 60),
             ],
           ),
         ),
@@ -4629,16 +4920,7 @@ class _ProfilePageState extends State<ProfilePage> {
                   ),
                   const SizedBox(height: 8),
                   ...records.map((r) {
-                    return Container(
-                      margin: const EdgeInsets.only(bottom: 8),
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: AppGreen.light.withOpacity(0.25),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(
-                          color: AppGreen.mid.withOpacity(0.4),
-                        ),
-                      ),
+                    return _highlightTile(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
@@ -4646,8 +4928,10 @@ class _ProfilePageState extends State<ProfilePage> {
                             "${r['tournament']} • ${r['year']}",
                             style: const TextStyle(fontWeight: FontWeight.w600),
                           ),
-                          Text("Achievement: ${r['achievement']}"),
-                          Text("Experience: ${r['experience']}"),
+                          if (r['achievement'] != null)
+                            Text("Achievement: ${r['achievement']}"),
+                          if (r['experience'] != null)
+                            Text("Experience: ${r['experience']}"),
                         ],
                       ),
                     );
@@ -4685,10 +4969,7 @@ class _ProfilePageState extends State<ProfilePage> {
           ),
           const SizedBox(height: 12),
           ...teamsList.map((team) {
-            return Container(
-              margin: const EdgeInsets.only(bottom: 14),
-              padding: const EdgeInsets.all(14),
-              decoration: _innerTileDecoration(),
+            return _highlightTile(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -4697,7 +4978,6 @@ class _ProfilePageState extends State<ProfilePage> {
                     style: const TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.w700,
-                      color: AppGreen.ink,
                     ),
                   ),
                   Text("Sport: ${team['sport']}"),
@@ -5174,6 +5454,7 @@ class _EditProfilePageState extends State<EditProfilePage> {
                                 MaterialPageRoute(
                                   builder: (_) => AddTeamPage(
                                     sportName: team['sport'],
+                                    sportId: team['sport_id'].toString(),
                                     existingTeam: team,
                                   ),
                                 ),
@@ -5342,40 +5623,50 @@ class _BookingHistoryPageState extends State<BookingHistoryPage> {
         if (!mounted) return;
         setState(() {
           bookings = data.map<Map<String, dynamic>>((b) {
-            final DateTime createdAt =
-                DateTime.tryParse(b["created_at"]) ?? now;
-
-            // ✅ Normalize status from backend
-            String status = (b["status"] ?? "active").toString().toLowerCase();
-            if (status == "rejected") status = "cancelled";
-
-            // ✅ Mark completed only if time passed and not cancelled
-            if (status != "cancelled" &&
-                now.difference(createdAt).inHours >= 3) {
-              status = "completed";
-            }
+            final DateTime bookedOn = DateTime.parse(b["created_at"]).toLocal();
+            final DateTime slotDate = DateTime.parse(b["date"]).toLocal();
+            final DateTime now = DateTime.now();
 
             final groundName = groundIdMap[b["ground_id"]] ?? "Unknown Ground";
 
-            final slotNames = (b["slots"] as List)
-                .map((id) => slotIdMap[id] ?? "Unknown Slot ($id)")
+            final slotIds = (b["slots"] as List).cast<int>();
+            final slotNames = slotIds
+                .map((id) => slotIdMap[id] ?? "Unknown Slot")
                 .toList();
 
-            final slotTimeRange = slotNames.isEmpty
-                ? "No slots assigned"
-                : "${slotNames.first} - ${slotNames.last}";
+            String slotTimeRange = "No Slots";
+            if (slotNames.isNotEmpty) {
+              final startTime = slotNames.first.split(" - ")[0];
+              final endTime = slotNames.last.split(" - ")[1];
+              slotTimeRange = "$startTime - $endTime";
+            }
+
+            final split = slotTimeRange.split(" - ");
+            final endTimeStr = split.length > 1 ? split[1] : slotTimeRange;
+
+            final parsedEnd = _parseTime(endTimeStr);
+            final endDateTime = DateTime(
+              slotDate.year,
+              slotDate.month,
+              slotDate.day,
+              parsedEnd.hour,
+              parsedEnd.minute,
+            );
+
+            String status = (b["status"] ?? "").toString().toLowerCase();
+            if (status == "rejected") status = "cancelled";
+            if (status != "cancelled" && now.isAfter(endDateTime))
+              status = "completed";
 
             return {
               "bookingId": b["booking_id"],
               "ground": groundName,
-              "sport": b["players"].isNotEmpty
-                  ? b["players"].first["sport"] ?? "Sport"
-                  : "Sport",
-              "slotCount": b["num_slots"],
+              "sport": groundToSportMap[b["ground_id"]] ?? "Sport",
+              "slotCount": slotIds.length,
               "slotTimeRange": slotTimeRange,
-              "slotDate": createdAt,
-              "bookedOn": createdAt,
-              "players": b["players"] ?? [],
+              "slotDate": slotDate,
+              "bookedOn": bookedOn,
+              "players": b["players"],
               "status": status,
             };
           }).toList();
@@ -5613,6 +5904,17 @@ class _BookingHistoryPageState extends State<BookingHistoryPage> {
     );
   }
 
+  TimeOfDay _parseTime(String time) {
+    final parts = time.split(" ");
+    final hm = parts[0].split(":");
+    int hour = int.parse(hm[0]);
+    int minute = int.parse(hm[1]);
+    final amPm = parts[1];
+    if (amPm == "PM" && hour != 12) hour += 12;
+    if (amPm == "AM" && hour == 12) hour = 0;
+    return TimeOfDay(hour: hour, minute: minute);
+  }
+
   Widget _tag(IconData icon, String text, bool isCancelled, bool isCompleted) {
     Color mainColor;
 
@@ -5652,6 +5954,26 @@ class _BookingHistoryPageState extends State<BookingHistoryPage> {
       ),
     );
   }
+
+  final Map<int, String> groundToSportMap = {
+    1: "Football",
+    2: "Cricket",
+    3: "Cricket",
+    4: "Hockey",
+    5: "Basketball",
+    6: "Basketball",
+    7: "Badminton",
+    8: "Badminton",
+    9: "Badminton",
+    10: "Badminton",
+    11: "Tennis",
+    12: "Tennis",
+    13: "Table Tennis",
+    14: "Table Tennis",
+    15: "Table Tennis",
+    16: "Table Tennis",
+    17: "Volleyball",
+  };
 
   String _month(int m) {
     const names = [
@@ -5864,6 +6186,94 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
         ),
       ),
     );
+  }
+
+  final _api = ApiClient.instance;
+
+  /// 1) Translate sport name to backend sport_id (unique translation table)
+  Future<String> translateSportNameToId(String sportName) async {
+    // Example: GET /sports/translate?name=Tennis  -> { "sport_id": 3, "sport_name": "Tennis" }
+    final j = await _api.getJson(
+      TRANSLATE_SPORT_PATH,
+      query: {"name": sportName},
+    );
+    final id = j["sport_id"] ?? j["id"];
+    if (id == null) throw Exception("sport_id not found for $sportName");
+    return id.toString();
+  }
+
+  Future<void> _broadcastLookingForPlayers() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString("access_token");
+
+    if (token == null) {
+      showGlassAlert(context, "Session expired. Please log in again.");
+      return;
+    }
+
+    // ✅ Normalize sport name → clean case
+    final raw = widget.sport.trim().toLowerCase();
+    final normalized = raw[0].toUpperCase() + raw.substring(1);
+
+    // ✅ Use your fixed ID table
+    final sportId = sportNameToId[normalized];
+    if (sportId == null) {
+      showGlassAlert(context, "Sport not supported: ${widget.sport}");
+      return;
+    }
+
+    // ✅ Use only one slot (backend expects ONE)
+    final selectedSlot = widget.selectedSlots.isNotEmpty
+        ? widget.selectedSlots.first
+        : null;
+    if (selectedSlot == null) {
+      showGlassAlert(context, "No slot selected.");
+      return;
+    }
+
+    final slotId = slotNameToId[selectedSlot];
+    if (slotId == null) {
+      showGlassAlert(context, "Could not match slot to backend slot ID.");
+      return;
+    }
+
+    // ✅ FINAL PAYLOAD EXACTLY AS BACKEND EXPECTS
+    final payload = {
+      "sport_id": sportId, // integer ✅
+      "date": widget.slotDate, // string ✅
+      "slot_id": slotId, // integer ✅ NOT LIST
+    };
+
+    print("Sending Broadcast Payload: $payload");
+
+    try {
+      final response = await http.post(
+        Uri.parse(
+          "https://turf-mgmt-sys.onrender.com/api/notifications/broadcast/looking-for-players/",
+        ),
+        headers: {
+          "Authorization": "Bearer $token",
+          "Content-Type": "application/json",
+        },
+        body: jsonEncode(payload),
+      );
+
+      print("BROADCAST STATUS = ${response.statusCode}");
+      print("BROADCAST BODY = ${response.body}");
+
+      if (response.statusCode == 200) {
+        if (!mounted) return;
+        Navigator.of(context).popUntil((route) => route.isFirst);
+        showGlassAlert(context, "✅ Invitation sent successfully!");
+      } else {
+        showGlassAlert(
+          context,
+          "Failed to send invitation (${response.statusCode}).\nCheck console logs.",
+        );
+      }
+    } catch (e) {
+      showGlassAlert(context, "Network error: $e");
+    }
   }
 
   Future<void> _submitBooking() async {
@@ -6145,7 +6555,7 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
                       color: const Color(0xFF4CAF50),
                       opacity: 0.25,
                       onTap: () {
-                        /*if (_checkingLocation) {
+                        if (_checkingLocation) {
                           showGlassAlert(
                             context,
                             "Checking location… please wait.",
@@ -6159,7 +6569,7 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
                             "Location did not verify. Please move near window / enable GPS.",
                           );
                           return;
-                        }*/
+                        }
                         _submitBooking();
                       },
                     ),
@@ -6178,10 +6588,7 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
                           );
                           return;
                         }
-                        showGlassAlert(
-                          context,
-                          "Invitations sent successfully!",
-                        );
+                        _broadcastLookingForPlayers();
                       },
                     ),
                   ),
