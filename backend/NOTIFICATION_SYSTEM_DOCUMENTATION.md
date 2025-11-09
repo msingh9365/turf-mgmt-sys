@@ -504,6 +504,7 @@ Users can broadcast to all app users that they're looking for players for a spec
 - **Title:** "Players Needed for [Sport]!"
 - **Body:** "[User Name] ([User Email]) is looking for players for [Sport] on [Date] at [Time]. Interested? Contact them!"
 - **Data Payload:** Contains sport details, date, slot info, user name, and user contact information
+- **Note:** The user who initiates the broadcast will NOT receive the notification themselves
 
 **API Endpoint:** `POST /api/notifications/broadcast/looking-for-players/`
 

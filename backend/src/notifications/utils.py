@@ -86,13 +86,25 @@ class FCMNotificationSender:
         
         return results
 
-    def broadcast(self, title, body, data=None):
+    def broadcast(self, title, body, data=None, exclude_user=None):
         """
         Broadcast notification to all active devices.
         Creates individual Notification records for each user.
-        Returns list of responses.
+        
+        Args:
+            title: Notification title
+            body: Notification body
+            data: Optional data payload
+            exclude_user: User object to exclude from broadcast (e.g., the sender)
+        
+        Returns:
+            List of responses.
         """
         devices = UserDevice.objects.filter(is_active=True)
+        
+        # Exclude devices belonging to the specified user
+        if exclude_user:
+            devices = devices.exclude(user=exclude_user)
         
         if not devices.exists():
             logger.warning("No active devices found for broadcast")
@@ -110,5 +122,5 @@ class FCMNotificationSender:
                 Notification.objects.create(user=device.user, title=title, body=body, data=data or {})
                 notified_users.add(device.user.id)
         
-        logger.info(f"Broadcast sent to {len(notified_users)} users")
+        logger.info(f"Broadcast sent to {len(notified_users)} users (excluded: {exclude_user.id if exclude_user else 'none'})")
         return results

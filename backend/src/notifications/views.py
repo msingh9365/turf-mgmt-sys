@@ -122,9 +122,9 @@ class BroadcastLookingForPlayersView(APIView):
             'user_email': user_email,
         }
         
-        # Send broadcast notification
+        # Send broadcast notification (exclude the sender)
         sender = FCMNotificationSender()
-        results = sender.broadcast(title, body, data)
+        results = sender.broadcast(title, body, data, exclude_user=user)
         
         logger.info(f"Broadcast sent by user {user.id} for {sport.sport_name} on {date} at slot {slot_id}")
         
