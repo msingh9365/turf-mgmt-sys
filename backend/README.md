@@ -2,6 +2,12 @@
 
 Django REST API backend for the turf management system.
 
+## 📖 Documentation
+
+- **[Booking System Documentation](BOOKING_SYSTEM_DOCUMENTATION.md)** - Complete API reference for booking management
+- **[Member Lock System](MEMBER_LOCK_SYSTEM.md)** - Sort key based locking mechanism
+- **[Performance Optimizations](PERFORMANCE_OPTIMIZATIONS.md)** - Database and Redis optimization details
+
 ## Quick Start
 
 ### Prerequisites
@@ -108,9 +114,30 @@ python manage.py runserver
 
 ## API Endpoints
 
-See [API Documentation](../docs/API.md) for detailed endpoint information.
+### Complete API Documentation
 
-### Authentication
+📚 **[Booking System Documentation](BOOKING_SYSTEM_DOCUMENTATION.md)** - Complete guide for all booking-related APIs
+
+This comprehensive documentation includes:
+- All booking endpoints (Create, List, Get, Cancel, Delete)
+- Booked slots availability API
+- Request/response examples
+- Error handling
+- Test documentation
+- Setup and troubleshooting guides
+- Best practices and flow diagrams
+
+### Quick Reference
+
+**Booking Endpoints:**
+- `POST /api/bookings/` - Create a booking
+- `GET /api/bookings/my/` - List my bookings
+- `GET /api/bookings/{id}/` - Get single booking
+- `POST /api/bookings/{id}/cancel/` - Cancel a booking
+- `DELETE /api/bookings/{id}/` - Delete a booking
+- `GET /api/bookings/booked-slots/` - Get booked slots for a ground/date
+
+**Authentication:**
 - `POST /api/auth/register/` - User registration
 - `POST /api/auth/login/` - Login (returns JWT tokens)
 - `POST /api/auth/token/refresh/` - Refresh access token
