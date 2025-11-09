@@ -180,30 +180,28 @@ class BroadcastLookingForPlayersView(APIView):
     
     def _format_slot_time(self, slot_id):
         """
-        Convert slot_id to readable time format.
-        Assuming slots are 30-minute intervals starting from 00:00 (1-48).
+        Convert slot_id to readable 12-hour start time.
+        Slots start at 8:00 AM. Slot 1 = 8:00 AM - 8:30 AM, ... Slot 28 = 9:30 PM - 10:00 PM.
         """
         try:
             slot_num = int(slot_id)
-            hours = (slot_num - 1) // 2
-            minutes = ((slot_num - 1) % 2) * 30
-            return f"{hours:02d}:{minutes:02d}"
+            if slot_num < 1 or slot_num > 28:
+                return f"Slot {slot_id}"
+            total_minutes = 8 * 60 + (slot_num - 1) * 30
+            return self._format_minutes_12h(total_minutes)
         except (ValueError, TypeError):
             return f"Slot {slot_id}"
 
     def _format_slot_end_time(self, slot_id):
         """
-        End time for a slot is 30 minutes after its start.
+        End time is 30 minutes after slot start. Slot 28 ends at 10:00 PM.
         """
         try:
             slot_num = int(slot_id)
-            total_minutes = slot_num * 30  # end boundary
-            hours = total_minutes // 60
-            minutes = total_minutes % 60
-            # Handle 24:00 for midnight end
-            if hours >= 24:
-                return "24:00"
-            return f"{hours:02d}:{minutes:02d}"
+            if slot_num < 1 or slot_num > 28:
+                return f"Slot {slot_id}"
+            total_minutes = 8 * 60 + slot_num * 30  # end boundary
+            return self._format_minutes_12h(total_minutes)
         except (ValueError, TypeError):
             return f"Slot {slot_id}"
 
@@ -232,3 +230,13 @@ class BroadcastLookingForPlayersView(APIView):
             end_text = self._format_slot_end_time(e)
             parts.append(f"{start_text} - {end_text}")
         return ", ".join(parts)
+
+    def _format_minutes_12h(self, total_minutes: int) -> str:
+        """Format minutes since 00:00 to 12-hour clock like '8:00 AM'."""
+        hours24 = (total_minutes // 60) % 24
+        minutes = total_minutes % 60
+        suffix = "AM" if hours24 < 12 else "PM"
+        hours12 = hours24 % 12
+        if hours12 == 0:
+            hours12 = 12
+        return f"{hours12}:{minutes:02d} {suffix}"
