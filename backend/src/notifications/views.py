@@ -71,12 +71,43 @@ class BroadcastLookingForPlayersView(APIView):
     def post(self, request):
         sport_id = request.data.get('sport_id')
         date = request.data.get('date')
+        # Support both single and multiple slots: slot_id or slot_ids
         slot_id = request.data.get('slot_id')
-        
+        slot_ids = request.data.get('slot_ids')
+
+        # Normalize slot_ids
+        normalized_slot_ids = []
+        if slot_ids is not None:
+            # Could be a list or a comma-separated string
+            if isinstance(slot_ids, str):
+                parts = [p.strip() for p in slot_ids.split(',') if p.strip()]
+                normalized_slot_ids = parts
+            elif isinstance(slot_ids, (list, tuple)):
+                normalized_slot_ids = list(slot_ids)
+            else:
+                return Response(
+                    {'detail': 'slot_ids must be a list or comma-separated string.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        if slot_id is not None:
+            normalized_slot_ids.append(slot_id)
+
+        # Coerce to strings then ints where possible to be tolerant of input types
+        coerced_slot_ids = []
+        for sid in normalized_slot_ids:
+            try:
+                coerced_slot_ids.append(int(str(sid)))
+            except (TypeError, ValueError):
+                return Response(
+                    {'detail': f'Invalid slot id: {sid}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
         # Validate required fields
-        if not all([sport_id, date, slot_id]):
+        if not sport_id or not date or not coerced_slot_ids:
             return Response(
-                {'detail': 'sport_id, date, and slot_id are required.'},
+                {'detail': 'sport_id, date, and at least one slot_id/slot_ids are required.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -89,52 +120,72 @@ class BroadcastLookingForPlayersView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        # Validate slot exists
-        try:
-            slot = Slot.objects.get(slot_id=slot_id)
-        except Slot.DoesNotExist:
+        # Validate slots exist for the given sport and date
+        # Note: slot_id is not globally unique; uniqueness is (ground, date, slot_id).
+        # We check presence of each requested slot_id across any ground for the sport.
+        existing = set(
+            Slot.objects.filter(
+                slot_id__in=coerced_slot_ids,
+                date=date,
+                ground__sport_id=sport_id,
+            ).values_list('slot_id', flat=True).distinct()
+        )
+        missing = [sid for sid in sorted(set(coerced_slot_ids)) if sid not in existing]
+        if missing:
             return Response(
-                {'detail': 'Slot not found.'},
+                {'detail': f'Slot(s) not found for given sport/date: {missing}'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
         # Get user details
         user = request.user
         user_email = user.email
-        user_name = user.name if hasattr(user, 'name') and user.name else user.email.split('@')[0]
-        
-        # Format slot time (assuming slot_id maps to time)
-        slot_time = self._format_slot_time(slot_id)
-        
+        user_name = getattr(user, 'name', None) or user.email.split('@')[0]
+
+        # Format slot time(s) from slot ids
+        slot_times = [self._format_slot_time(sid) for sid in coerced_slot_ids]
+        slot_time_text = ", ".join(slot_times)
+
         # Construct notification message
         title = f"Players Needed for {sport.sport_name}!"
-        body = f"{user_name} ({user_email}) is looking for players for {sport.sport_name} on {date} at {slot_time}. Interested? Contact them!"
-        
+        body = (
+            f"{user_name} ({user_email}) is looking for players for {sport.sport_name} "
+            f"on {date} at {slot_time_text}. Interested? Contact them!"
+        )
+
         # Data payload for app deep-linking
         data = {
             'type': 'looking_for_players',
             'sport_id': str(sport_id),
             'sport_name': sport.sport_name,
             'date': date,
-            'slot_id': str(slot_id),
-            'slot_time': slot_time,
+            # Only include human-readable times; do not include slot ids
+            'slot_time': slot_time_text,
+            'slot_times': slot_times,
             'user_name': user_name,
             'user_email': user_email,
         }
-        
+
         # Send broadcast notification (exclude the sender)
         sender = FCMNotificationSender()
         results = sender.broadcast(title, body, data, exclude_user=user)
-        
-        logger.info(f"Broadcast sent by user {user.id} for {sport.sport_name} on {date} at slot {slot_id}")
-        
+
+        logger.info(
+            "Broadcast sent by user %s for %s on %s at slot %s",
+            user.id,
+            sport.sport_name,
+            date,
+            coerced_slot_ids,
+        )
+
         return Response(
             {
                 'detail': 'Broadcast notification sent successfully.',
                 'recipients': len(results),
                 'sport': sport.sport_name,
                 'date': date,
-                'slot_time': slot_time,
+                'slot_time': slot_time_text,
+                'slot_times': slot_times,
             },
             status=status.HTTP_200_OK
         )
