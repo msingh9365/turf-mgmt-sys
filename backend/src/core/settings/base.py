@@ -74,6 +74,7 @@ INSTALLED_APPS = [
     # Local apps
     "users",
     "bookings",
+    "events",
 ]
 
 MIDDLEWARE = [
@@ -234,3 +235,10 @@ else:
             "TIMEOUT": 300,
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# Events app configuration
+# ---------------------------------------------------------------------------
+# This tells the events app to use the Sport model from the bookings app.
+SPORT_MODEL = "bookings.Sport"
