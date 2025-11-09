@@ -75,6 +75,7 @@ INSTALLED_APPS = [
     "users",
     "bookings",
     "teams",
+    "profile_app",
 ]
 
 MIDDLEWARE = [
