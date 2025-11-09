@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status, permissions
@@ -66,7 +67,7 @@ def list_or_create_team(request):
                     user=captain,
                     member_name=getattr(captain, 'name', captain.email),
                     email_id=captain_email,
-                    sort_key=captain_email[:7] if len(captain_email) >= 7 else captain_email,
+                    sort_key=(captain_email[:7].lower() if len(captain_email) >= 7 else captain_email.lower()),
                     role="captain"
                 )
 
@@ -75,20 +76,25 @@ def list_or_create_team(request):
                 failed_emails = []
                 for email in member_emails:
                     try:
-                        # Optimized lookup: First filter by sort_key index (first 7 chars of email)
-                        # then perform exact match on the filtered results
-                        # Use case-insensitive match for sort_key since emails are lowercased
-                        sort_key_prefix = email[:7] if len(email) >= 7 else email
-                        member = User.objects.filter(sort_key__iexact=sort_key_prefix).get(email__iexact=email)
-                        
-                        # Try to create, skip silently if duplicate (shouldn't happen with dedup above)
+                        # Case-insensitive two-step lookup:
+                        # 1. Narrow by sort_key (first 7 chars of email) using indexed field
+                        # 2. Exact (case-insensitive) match on email within that subset
+                        email_l = (email or "").strip().lower()
+                        prefix = email_l[:7] if len(email_l) >= 7 else email_l
+                        try:
+                            member = User.objects.filter(sort_key__iexact=prefix).get(email__iexact=email_l)
+                        except User.DoesNotExist:
+                            # Fallback: direct email lookup (handles legacy or missing sort_key consistency)
+                            member = User.objects.get(email__iexact=email_l)
+
+                        # Create membership; dedup on DB-level unique constraint (team, user)
                         member_email = getattr(member, 'email', '')
                         TeamMember.objects.create(
                             team=team,
                             user=member,
                             member_name=getattr(member, 'name', member.email),
                             email_id=member_email,
-                            sort_key=member_email[:7] if len(member_email) >= 7 else member_email,
+                            sort_key=(member_email[:7].lower() if len(member_email) >= 7 else member_email.lower()),
                             role="player"
                         )
                         added_members += 1
@@ -235,3 +241,38 @@ def respond_to_join_request(request, id):
 @permission_classes([permissions.IsAuthenticated])
 def respond_to_match_invitation(request, id):
     return Response({"detail": "Respond to match invitation not implemented yet."}, status=status.HTTP_501_NOT_IMPLEMENTED)
+
+
+@api_view(["GET"])
+def list_teams_by_sport(request):
+    """
+    GET /api/teams/by-sport/?sport_id=<int>
+
+    Returns a lean list of teams for a given sport with only two fields per item:
+    - team_id
+    - team_name
+
+    Performance considerations:
+    - Filters by sport_id directly (uses FK index)
+    - Fetches only required fields via values() to avoid model instantiation overhead
+    - Orders by team_name for stable responses (optional but helpful for clients)
+    """
+    sport_id = request.query_params.get("sport_id")
+    if sport_id is None:
+        return Response({"message": "sport_id is required as a query parameter"}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        sport_id_int = int(sport_id)
+    except (TypeError, ValueError):
+        return Response({"message": "sport_id must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Filter by FK id; rely on queryset returning empty list if sport has no teams
+    qs = (
+        Team.objects
+        .filter(sport_id=sport_id_int)
+        .only("team_id", "team_name")
+        .order_by("team_name")
+    )
+
+    # Use values to return lean dicts and avoid extra attribute access
+    data = list(qs.values("team_id", "team_name"))
+    return Response(data, status=status.HTTP_200_OK)

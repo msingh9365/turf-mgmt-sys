@@ -93,3 +93,42 @@ class TestTeamsAPI:
     def test_team_detail_not_found(self):
         resp = self.client.get('/api/teams/9999/')
         assert resp.status_code == 404
+
+    def test_list_teams_by_sport_requires_param(self):
+        resp = self.client.get('/api/teams/by-sport/')
+        assert resp.status_code == 400
+        assert 'sport_id' in resp.json()['message']
+
+    def test_list_teams_by_sport_empty(self):
+        sport = Sport.objects.create(sport_name="Volleyball", min_player=2)
+        resp = self.client.get(f'/api/teams/by-sport/?sport_id={sport.sport_id}')
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_list_teams_by_sport_populated_and_sorted(self):
+        sport = Sport.objects.create(sport_name="Hockey", min_player=2)
+        User.objects.create_user(email="cap@example.com", password="pass", name="Cap", sort_key="cap")
+        # Create teams via API for consistency
+        self.client.post('/api/teams/', {"team_name": "Zeta", "sport_id": sport.sport_id, "member_emails": []}, format='json')
+        self.client.post('/api/teams/', {"team_name": "Alpha", "sport_id": sport.sport_id, "member_emails": []}, format='json')
+        self.client.post('/api/teams/', {"team_name": "Beta", "sport_id": sport.sport_id, "member_emails": []}, format='json')
+
+        resp = self.client.get(f'/api/teams/by-sport/?sport_id={sport.sport_id}')
+        assert resp.status_code == 200
+        data = resp.json()
+        names = [d['team_name'] for d in data]
+        assert names == sorted(names), "Teams should be ordered alphabetically by team_name"
+        assert all(set(item.keys()) == {"team_id", "team_name"} for item in data)
+
+    def test_list_teams_by_sport_query_efficiency(self):
+        sport = Sport.objects.create(sport_name="Rugby", min_player=1)
+        User.objects.create_user(email="capr@example.com", password="pass", name="CapR", sort_key="capr")
+        for i in range(10):
+            self.client.post('/api/teams/', {"team_name": f"R{i}", "sport_id": sport.sport_id, "member_emails": []}, format='json')
+        from django.db import reset_queries, connection
+        reset_queries()
+        resp = self.client.get(f'/api/teams/by-sport/?sport_id={sport.sport_id}')
+        q_count = len(connection.queries)
+        assert resp.status_code == 200
+        # Expect 1 primary select plus possibly auth/session overhead; keep generous cap 5
+        assert q_count <= 5, f"Excessive queries for by-sport list: {q_count}"
