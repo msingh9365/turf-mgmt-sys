@@ -74,6 +74,7 @@ INSTALLED_APPS = [
     # Local apps
     "users",
     "bookings",
+    "teams",
     "notifications",  # Notification system for FCM
 ]
 # FCM configuration
