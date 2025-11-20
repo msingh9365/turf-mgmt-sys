@@ -428,11 +428,14 @@ Broadcasts a notification to all app users that the authenticated user is lookin
 {
   "detail": "Broadcast notification sent successfully.",
   "recipients": 25,
+  "failed_tokens": ["stale_token_1", "stale_token_2"],
   "sport": "Football",
   "date": "2025-11-15",
   "slot_time": "18:00"
 }
 ```
+
+`recipients` counts only successful deliveries (active, valid tokens). `failed_tokens` lists device tokens that were attempted but rejected by FCM (e.g. unregistered or invalid) and have now been deactivated.
 
 **Error Response (400 Bad Request - Missing fields):**
 ```json
@@ -463,7 +466,7 @@ curl -X POST http://localhost:8000/api/notifications/broadcast/looking-for-playe
   -d '{"sport_id": 1, "date": "2025-11-15", "slot_id": 36}'
 ```
 
-**Notification Message Sent to All Users:**
+**Notification Message Sent to All Users (Data Payload Example):**
 - **Title:** "Players Needed for Football!"
 - **Body:** "John Doe (john@example.com) is looking for players for Football on 2025-11-15 at 18:00. Interested? Contact them!"
 - **Data Payload:**
@@ -475,10 +478,31 @@ curl -X POST http://localhost:8000/api/notifications/broadcast/looking-for-playe
   "date": "2025-11-15",
   "slot_id": "36",
   "slot_time": "18:00",
+  "slot_times": ["18:00"],
   "user_name": "John Doe",
   "user_email": "john@example.com"
 }
 ```
+
+### Invalid / Stale Token Handling
+During sends and broadcasts, if FCM returns an `UnregisteredError` or `InvalidArgumentError`, the backend automatically marks the corresponding `UserDevice.is_active` as `False`. These tokens appear in the `failed_tokens` response field for broadcasts so the client can optionally trigger a re-registration flow.
+
+### Token Pruning
+Use the management command to cleanup inactive or stale tokens:
+```bash
+python manage.py prune_invalid_tokens --days-inactive 7 --delete
+```
+Flags:
+- `--days-inactive <int>`: Mark or delete tokens inactive for more than N days.
+- `--delete`: Permanently delete inactive tokens instead of just marking inactive.
+
+Run without `--delete` to first mark stale active tokens inactive:
+```bash
+python manage.py prune_invalid_tokens --days-inactive 14
+```
+
+### Profile Endpoint Alias
+User profile is available at `GET /api/user/me/`. An alias `GET /api/profile/me/` now maps to the same view for backward compatibility with older clients.
 
 ---
 

@@ -232,3 +232,30 @@ class TestBroadcastLookingForPlayers:
         assert response.status_code == 200
         assert response.data['slot_time'] == '8:00 AM - 9:30 AM'
         assert response.data['slot_times'] == ['8:00 AM', '8:30 AM', '9:00 AM']
+
+    @patch('notifications.utils.messaging.send')
+    def test_failed_token_deactivation_and_reporting(self, mock_send):
+        from firebase_admin import messaging
+
+        def _raise_unregistered(message):  # message param ignored; FCM constructs internally
+            raise messaging.UnregisteredError("Requested entity was not found.")
+
+        mock_send.side_effect = _raise_unregistered
+
+        # Add an extra stale token for user2
+        from notifications.models import UserDevice
+        UserDevice.objects.create(user=self.user2, device_token='stale_token', device_type='android', is_active=True)
+
+        url = reverse('broadcast-looking-for-players')
+        data = {'sport_id': self.football.sport_id, 'date': '2025-11-15', 'slot_id': 1}
+        response = self.client.post(url, data, format='json')
+
+        assert response.status_code == 200
+        # All sends failed -> recipients should be 0
+        assert response.data['recipients'] == 0
+        assert 'failed_tokens' in response.data
+        assert 'stale_token' in response.data['failed_tokens']
+
+        # Token should now be inactive
+        stale = UserDevice.objects.get(device_token='stale_token')
+        assert stale.is_active is False

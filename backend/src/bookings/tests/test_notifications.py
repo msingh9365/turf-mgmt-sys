@@ -3,7 +3,7 @@ Unit tests for booking notifications.
 """
 import pytest
 from django.contrib.auth import get_user_model
-from bookings.models import Booking, BookedDetails, Ground, Sport, Slot
+from bookings.models import Booking, Booked_Details, Ground, Sport, Slot
 from notifications.models import Notification, UserDevice
 from unittest.mock import patch, MagicMock
 
@@ -48,16 +48,14 @@ class TestBookingNotifications:
         )
         
         # Create booking details
-        slot = Slot.objects.create(
-            slot_id=1,
-            ground=self.ground,
-            price=100
-        )
-        BookedDetails.objects.create(
+        Booked_Details.objects.create(
             booking=booking,
             ground=self.ground,
-            slot=slot,
-            player_name='Test Player'
+            slot_id=1,
+            date='2025-11-10',
+            player_name='Test Player',
+            player_email='test@example.com',
+            sort_key='TEST'
         )
         
         # Verify notification was created
@@ -69,11 +67,11 @@ class TestBookingNotifications:
     @patch('notifications.utils.messaging.send')
     def test_no_notification_for_cancelled_booking(self, mock_send):
         """Test that no notification is sent for cancelled bookings."""
-        # Create a cancelled booking
+        # Create a rejected booking (no STATUS_CANCELLED constant)
         booking = Booking.objects.create(
             user=self.user,
             date='2025-11-10',
-            status=Booking.STATUS_CANCELLED
+            status=Booking.STATUS_REJECTED
         )
         
         # Verify no notification was created
@@ -93,4 +91,4 @@ class TestBookingNotifications:
         )
         
         # Verify booking was created
-        assert Booking.objects.filter(id=booking.id).exists()
+        assert Booking.objects.filter(booking_id=booking.booking_id).exists()

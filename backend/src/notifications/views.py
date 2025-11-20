@@ -157,6 +157,8 @@ class BroadcastLookingForPlayersView(APIView):
         # Send broadcast notification (exclude the sender)
         sender = FCMNotificationSender()
         results = sender.broadcast(title, body, data, exclude_user=user)
+        success_count = sum(1 for _, r in results if r)
+        failed_tokens = [t for t, r in results if not r]
 
         logger.info(
             "Broadcast sent by user %s for %s on %s at slots %s",
@@ -169,7 +171,8 @@ class BroadcastLookingForPlayersView(APIView):
         return Response(
             {
                 'detail': 'Broadcast notification sent successfully.',
-                'recipients': len(results),
+                'recipients': success_count,
+                'failed_tokens': failed_tokens,
                 'sport': sport.sport_name,
                 'date': date,
                 'slot_time': slot_time_text,

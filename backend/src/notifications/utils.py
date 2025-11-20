@@ -54,7 +54,14 @@ class FCMNotificationSender:
             response = messaging.send(message)
             logger.info(f"FCM sent to {device_token}: {response}")
             return response
-        except Exception as e:
+        except messaging.UnregisteredError as e:
+            logger.warning(f"Deactivating invalid FCM token {device_token}: {e}")
+            try:
+                UserDevice.objects.filter(device_token=device_token, is_active=True).update(is_active=False)
+            except Exception as db_e:
+                logger.error(f"Failed to deactivate device token {device_token}: {db_e}")
+            return None
+        except firebase_admin.exceptions.FirebaseError as e:
             logger.error(f"FCM send error to {device_token}: {e}")
             return None
 
@@ -112,15 +119,14 @@ class FCMNotificationSender:
         
         results = []
         notified_users = set()
-        
+
         for device in devices:
             resp = self.send_to_device(device.device_token, title, body, data)
-            results.append(resp)
-            
-            # Create notification record once per user
+            results.append((device.device_token, resp))
+
             if resp and device.user.id not in notified_users:
                 Notification.objects.create(user=device.user, title=title, body=body, data=data or {})
                 notified_users.add(device.user.id)
-        
-        logger.info(f"Broadcast sent to {len(notified_users)} users (excluded: {exclude_user.id if exclude_user else 'none'})")
+
+        logger.info(f"Broadcast successful for {len(notified_users)} users (excluded: {exclude_user.id if exclude_user else 'none'})")
         return results

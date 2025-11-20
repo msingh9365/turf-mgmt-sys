@@ -20,10 +20,13 @@ class TestNotificationAPI:
         assert UserDevice.objects.filter(user=self.user, device_token='abc123').exists()
 
     def test_send_notification(self):
+        from unittest.mock import patch
         UserDevice.objects.create(user=self.user, device_token='abc123', device_type='android')
         url = reverse('send-notification')
         data = {'title': 'Test', 'body': 'Hello', 'user_id': self.user.id}
-        response = self.client.post(url, data)
+        with patch('notifications.utils.messaging.send') as mock_send:
+            mock_send.return_value = 'mock_message_id'
+            response = self.client.post(url, data)
         assert response.status_code == 200
         assert Notification.objects.filter(user=self.user, title='Test').exists()
 
@@ -32,4 +35,8 @@ class TestNotificationAPI:
         url = reverse('notification-history')
         response = self.client.get(url)
         assert response.status_code == 200
-        assert response.data[0]['title'] == 'Test'
+        # Response is paginated, check results key
+        assert 'results' in response.data or isinstance(response.data, list)
+        results = response.data.get('results', response.data) if isinstance(response.data, dict) else response.data
+        assert len(results) > 0
+        assert results[0]['title'] == 'Test'
