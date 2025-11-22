@@ -11,4 +11,6 @@ urlpatterns = [
 
     # API routes
     path("api/", include("users.urls")),
+    # OTP endpoints (available under /api/otp/...)
+    path("api/otp/", include("otp.urls")),
 ]
