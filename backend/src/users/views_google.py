@@ -129,7 +129,10 @@ def google_sign_in_android(request):
                 status=status.HTTP_403_FORBIDDEN
             )
         
-        default_sort_key = email[:7]
+        # Normalize email and sort_key to lowercase
+        email = email.lower()
+        default_sort_key = email[:7].lower()
+        
         # Get or create user
         user, created = User.objects.get_or_create(
             email=email,
@@ -148,7 +151,7 @@ def google_sign_in_android(request):
             fields_to_update.append('name')
 
         if not user.sort_key:
-            user.sort_key = default_sort_key
+            user.sort_key = default_sort_key.lower()
             fields_to_update.append('sort_key')
 
         user.last_login = now
