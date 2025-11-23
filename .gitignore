@@ -5,10 +5,6 @@
 
 # .DS_Store
 
-# Environment files
-.env
-.env.local
-*.env
 
 # SQLite databases
 db.sqlite3
