@@ -8,6 +8,7 @@ This app provides simple team management endpoints integrated with the existing 
 - POST /api/teams/ — create a team
   - body: {"team_name": str, "sport_id": int, "member_emails": [str, ...]}
 - GET /api/teams/<id>/ — team detail with members
+- GET /api/teams/by-sport/?sport_id=<id> — list teams for a sport (returns only team_id + team_name for efficiency)
 
 Additional action endpoints are wired but return 501 for now:
 - POST /api/teams/<id>/invite-member/
@@ -77,6 +78,7 @@ Response on duplicate name (400):
 - Detail endpoint uses `select_related` and prefetches members efficiently
 - Query count capped at ≤5 queries regardless of team size
 - Response times: List < 300ms, Detail < 200ms
+- Sport-filter endpoint uses FK index + `values()` for lean payload and single-query execution (≤5 total including framework overhead)
 
 ## Tests
 Run the focused tests:

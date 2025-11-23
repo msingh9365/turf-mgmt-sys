@@ -75,8 +75,13 @@ INSTALLED_APPS = [
     "users",
     "bookings",
     "teams",
+    "notifications",  # Notification system for FCM
     "profile_app",
 ]
+# FCM configuration
+# Add FCM_SERVER_KEY to your .env file:
+# FCM_SERVER_KEY=your_firebase_server_key_here
+FCM_SERVER_KEY = env("FCM_SERVER_KEY", default=None)
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",

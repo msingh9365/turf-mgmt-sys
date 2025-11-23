@@ -123,9 +123,11 @@ class BookingSummarySerializer(serializers.ModelSerializer):
             "booking_id",  # 1. Booking Id
             "slots",       # 2. List of slot Id's
             "ground_id",   # 3. Ground Id
-            "players",     # 4. Players in the booking
-            "num_slots",   # 5. No. of slots
-            "created_at",  # 6. Created At
+            "date",        # 4. Date of the booking
+            "players",     # 5. Players in the booking
+            "num_slots",   # 6. No. of slots
+            "created_at",  # 7. Created At
+            "status",      # 8. Current status of booking
         ]
         read_only_fields = fields
 

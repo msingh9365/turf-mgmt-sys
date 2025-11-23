@@ -333,13 +333,12 @@ class TestBookingCreation:
 class TestMemberLockSystem:
     """Tests for member lock system - preventing duplicate bookings for registered users."""
     
-    def test_member_lock_prevents_duplicate_booking_same_ground_same_date(
+    def test_member_lock_prevents_duplicate_overlapping_slots_same_date(
         self, authenticated_client, test_user, another_user, fake_redis_client, ground
     ):
-        """Test that a registered user cannot book the same ground on the same date twice."""
+        """User cannot book overlapping slots on same date (across any ground)."""
         tomorrow = (timezone.now() + timedelta(days=1)).date()
-        
-        # Create first booking for test_user
+
         first_booking = _api_create_booking(
             authenticated_client,
             ground,
@@ -347,77 +346,78 @@ class TestMemberLockSystem:
             tomorrow,
             [{"name": "Test User", "email": test_user.email}],
         )
-        
         assert first_booking["booking_id"]
-        
-        # Try to create second booking with test_user in players list (different slots)
+
+        # Overlap on slot 6 should trigger conflict
         data = {
             "ground_id": ground.ground_id,
-            "slot_id": [7, 8],  # Different slots
-            "date": str(tomorrow),  # Same date
+            "slot_id": [6, 9],
+            "date": str(tomorrow),
             "players": [
-                {"name": "Test User", "email": test_user.email},  # Same user
+                {"name": "Test User", "email": test_user.email},
                 {"name": "Guest", "email": "guest@example.com"},
             ],
         }
-        
         response = authenticated_client.post("/api/bookings/", data, format="json")
-        
         assert response.status_code == status.HTTP_409_CONFLICT
         assert "Member lock violation" in response.data["error"]
-        assert test_user.email.lower() in response.data["message"].lower()
-        assert first_booking["booking_id"] == response.data["existing_booking_id"]
+        assert test_user.email.lower() in response.data["conflicting_player"].lower()
+
+    def test_member_lock_allows_same_date_non_overlapping_slots(
+        self, authenticated_client, test_user, fake_redis_client, ground
+    ):
+        """Second booking with disjoint slots is allowed."""
+        tomorrow = (timezone.now() + timedelta(days=1)).date()
+        _api_create_booking(
+            authenticated_client,
+            ground,
+            [5, 6],
+            tomorrow,
+            [{"name": "Test User", "email": test_user.email}],
+        )
+        # Disjoint slots [7,8]
+        data = {
+            "ground_id": ground.ground_id,
+            "slot_id": [7, 8],
+            "date": str(tomorrow),
+            "players": [{"name": "Test User", "email": test_user.email}],
+        }
+        response = authenticated_client.post("/api/bookings/", data, format="json")
+        assert response.status_code == status.HTTP_200_OK
     
-    def test_member_lock_prevents_duplicate_with_another_user_in_players(
+    def test_member_lock_prevents_duplicate_with_another_user_overlapping(
         self, authenticated_client, test_user, another_user, fake_redis_client, ground
     ):
-        """Test that member lock blocks if ANY registered player has existing booking."""
+        """Conflict triggered if ANY registered player has overlapping slot booking."""
         tomorrow = (timezone.now() + timedelta(days=1)).date()
-        
-        # Create first booking with another_user
         booking_payload = {
             "ground_id": ground.ground_id,
             "slot_id": [10, 11],
             "date": str(tomorrow),
             "players": [{"name": another_user.name, "email": another_user.email}],
         }
-        
-        # Create booking as test_user (creator auto-added)
         response1 = authenticated_client.post("/api/bookings/", booking_payload, format="json")
         assert response1.status_code == status.HTTP_200_OK
-        first_booking_id = response1.data["booking_id"]
-        
-        # Now try to book again including another_user in players
+        # Overlap on slot 11
         data = {
             "ground_id": ground.ground_id,
-            "slot_id": [12, 13],  # Different slots
-            "date": str(tomorrow),  # Same date
+            "slot_id": [11, 13],
+            "date": str(tomorrow),
             "players": [
-                {"name": another_user.name, "email": another_user.email},  # Has existing booking
+                {"name": another_user.name, "email": another_user.email},
                 {"name": "New Guest", "email": "newguest@example.com"},
             ],
         }
-        
         response = authenticated_client.post("/api/bookings/", data, format="json")
-        
         assert response.status_code == status.HTTP_409_CONFLICT
-        assert "Member lock violation" in response.data["error"]
         assert another_user.email.lower() in response.data["conflicting_player"].lower()
-        assert first_booking_id == response.data["existing_booking_id"]
     
-    def test_member_lock_allows_different_ground_same_date(
+    def test_member_lock_conflict_across_different_ground_same_slot(
         self, authenticated_client, test_user, fake_redis_client, ground, sport
     ):
-        """Test that member can book different ground on same date."""
+        """Conflict spans multiple grounds when slots overlap on same date."""
         tomorrow = (timezone.now() + timedelta(days=1)).date()
-        
-        # Create another ground
-        ground2 = Ground.objects.create(
-            ground_name="Ground 2",
-            sport=sport,
-        )
-        
-        # Create first booking on ground 1
+        ground2 = Ground.objects.create(ground_name="Ground 2", sport=sport)
         _api_create_booking(
             authenticated_client,
             ground,
@@ -425,19 +425,14 @@ class TestMemberLockSystem:
             tomorrow,
             [{"name": "Test User", "email": test_user.email}],
         )
-        
-        # Try to book ground 2 on same date - should succeed
         data = {
             "ground_id": ground2.ground_id,
-            "slot_id": [5],
+            "slot_id": [5],  # Overlapping slot across different ground
             "date": str(tomorrow),
             "players": [{"name": "Test User", "email": test_user.email}],
         }
-        
         response = authenticated_client.post("/api/bookings/", data, format="json")
-        
-        assert response.status_code == status.HTTP_200_OK
-        assert response.data["booking_id"]
+        assert response.status_code == status.HTTP_409_CONFLICT
     
     def test_member_lock_allows_same_ground_different_date(
         self, authenticated_client, test_user, fake_redis_client, ground
@@ -574,7 +569,7 @@ class TestMemberLockSystem:
         # Creator will be auto-included and should trigger member lock
         data = {
             "ground_id": ground.ground_id,
-            "slot_id": [6],
+            "slot_id": [5],  # overlap with creator's existing booking
             "date": str(tomorrow),
             "players": [{"name": "Another Guest", "email": "another@example.com"}],
         }

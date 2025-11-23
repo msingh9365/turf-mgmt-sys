@@ -14,4 +14,5 @@ urlpatterns = [
 
     # Profile
     path("user/me/", MeView.as_view(), name="user-me"),
+    path("profile/me/", MeView.as_view(), name="profile-me"),
 ]
