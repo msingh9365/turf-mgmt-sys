@@ -17,7 +17,7 @@ class UserManager(BaseUserManager):
     def create_user(self, email: str, password: str | None = None, **extra_fields):
         if not email:
             raise ValueError("Users must have an email address")
-        email = self.normalize_email(email)
+        email = self.normalize_email(email).lower()  # Ensure email is lowercase
         user = self.model(email=email, **extra_fields)
         if password:
             user.set_password(password)
@@ -34,7 +34,7 @@ class UserManager(BaseUserManager):
             raise ValueError("Superuser must have is_staff=True.")
         if extra_fields.get("is_superuser") is not True:
             raise ValueError("Superuser must have is_superuser=True.")
-        return self.create_user(email, password, **extra_fields)
+        return self.create_user(email.lower(), password, **extra_fields)
 
 
 class User(AbstractBaseUser, PermissionsMixin):
@@ -83,6 +83,14 @@ class User(AbstractBaseUser, PermissionsMixin):
         constraints = [
             models.UniqueConstraint(fields=["email"], name="unique_user_email"),
         ]
+
+    def save(self, *args, **kwargs):
+        """Ensure email and sort_key are stored in lowercase."""
+        if self.email:
+            self.email = self.email.lower()
+        if self.sort_key:
+            self.sort_key = self.sort_key.lower()
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return f"{self.email} ({self.name})"

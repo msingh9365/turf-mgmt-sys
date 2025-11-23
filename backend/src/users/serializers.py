@@ -27,6 +27,13 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     def validate_email(self, value: str) -> str:  # type: ignore[override]
         validate_college_email(value)
+        # Normalize email to lowercase
+        return value.lower()
+
+    def validate_sort_key(self, value: str) -> str:  # type: ignore[override]
+        # Normalize sort_key to lowercase
+        if value:
+            return value.lower()
         return value
 
     def create(self, validated_data):

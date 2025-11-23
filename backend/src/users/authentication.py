@@ -17,8 +17,10 @@ class EmailBackend(ModelBackend):
         email = kwargs.get("email") or username
         if email is None or password is None:
             return None
+        # Convert email to lowercase for consistent lookup
+        email = email.lower()
         try:
-            user = get_user_model().objects.get(email__iexact=email)
+            user = get_user_model().objects.get(email=email)
         except get_user_model().DoesNotExist:  # type: ignore[attr-defined]
             return None
         if user.check_password(password) and self.user_can_authenticate(user):

@@ -8,6 +8,7 @@ This file is imported by environment-specific settings (dev/prod).
 from __future__ import annotations
 
 from datetime import timedelta
+import os
 from pathlib import Path
 
 import environ
@@ -40,15 +41,24 @@ env = environ.Env(
     EMAIL_HOST_USER=(str, ""),
     EMAIL_HOST_PASSWORD=(str, ""),
     DEFAULT_FROM_EMAIL=(str, ""),
+    REDIS_HOST=(str, "localhost"),
+    REDIS_PORT=(int, 6379),
+    REDIS_PASSWORD=(str, ""),
+    REDIS_DB=(int, 0),
 )
 
 # Load .env if present at project root
 ENV_FILE = BASE_DIR / ".env"
 LOCAL_ENV_FILE = BASE_DIR / ".env.local"
 
+# Load .env first, then allow .env.local to override it (use overwrite=True for .env.local)
 for env_path in (ENV_FILE, LOCAL_ENV_FILE):
     if env_path.exists():
-        environ.Env.read_env(str(env_path))
+        if env_path == LOCAL_ENV_FILE:
+            # Let .env.local override values from .env (and any previously set ones)
+            environ.Env.read_env(str(env_path), overwrite=True)
+        else:
+            environ.Env.read_env(str(env_path))
 
 DEBUG = env.bool("DEBUG")
 SECRET_KEY = env("DJANGO_SECRET_KEY") or "unsafe-dev-key-change-me"
@@ -73,9 +83,17 @@ INSTALLED_APPS = [
     "users",
     'otp',
 
+    "bookings",
+    "teams",
+    "notifications",  # Notification system for FCM
 ]
+# FCM configuration
+# Add FCM_SERVER_KEY to your .env file:
+# FCM_SERVER_KEY=your_firebase_server_key_here
+FCM_SERVER_KEY = env("FCM_SERVER_KEY", default=None)
 
 MIDDLEWARE = [
+    "core.middleware.StripAuthForOtpMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -208,3 +226,36 @@ EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS")
 EMAIL_HOST_USER = env("EMAIL_HOST_USER")
 EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD")
 DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL") or EMAIL_HOST_USER
+
+# Redis configuration
+REDIS_HOST = env("REDIS_HOST")
+REDIS_PORT = env("REDIS_PORT")
+REDIS_PASSWORD = env("REDIS_PASSWORD")
+REDIS_DB = env("REDIS_DB")
+
+# Cache configuration
+# Use Redis in production by default. In local dev/tests, prefer LocMem unless explicitly enabled.
+RUNNING_TESTS = "PYTEST_CURRENT_TEST" in os.environ
+USE_REDIS_CACHE = env.bool("USE_REDIS_CACHE", default=not DEBUG and not RUNNING_TESTS)
+
+if USE_REDIS_CACHE:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": (
+                f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+                if REDIS_PASSWORD
+                else f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+            ),
+            "KEY_PREFIX": "turf_mgmt",
+            "TIMEOUT": 300,
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "turf_mgmt_locmem",
+            "TIMEOUT": 300,
+        }
+    }

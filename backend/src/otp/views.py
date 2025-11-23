@@ -5,6 +5,7 @@ import random
 from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework import status, generics
+from rest_framework.permissions import AllowAny
 from .models import EmailOTP
 from django.core.mail import send_mail
 from django.conf import settings
@@ -12,6 +13,12 @@ from .serializers import SendOTPSerializer, VerifyOTPSerializer
 
 
 class SendOTPView(generics.GenericAPIView):
+
+    # Ignore any Authorization header for this public endpoint
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+
     serializer_class = SendOTPSerializer
 
     def post(self, request):
@@ -21,7 +28,6 @@ class SendOTPView(generics.GenericAPIView):
 
         # Follow signup flow: allow OTP for any (college-domain) email.
         # The frontend will create the user after OTP verification.
-
         # Rate-limit: if a non-expired OTP exists for this email, deny a new one
         last = EmailOTP.objects.filter(email__iexact=email).order_by("-created_at").first()
         if last and not last.is_expired():
@@ -36,16 +42,36 @@ class SendOTPView(generics.GenericAPIView):
         # Send Email
         send_mail(
             subject="Your OTP Code",
-            message=f"Your OTP is {otp}. It will expire in 5 minutes.",
+            message=
+            (
+                f"Dear User,\n\n"
+                f"Your One-Time Password (OTP) for accessing the IIT Ropar Sports Booking System "
+                f"is: {otp}\n\n"
+                f"This OTP is valid for the next 5 minutes and is required to verify your identity "
+                f"before you can continue with secure login and booking operations.\n\n"
+                f"Thank you for using the Proximity-Based Sports Networking & Turf Management System.\n"
+                f"Team EndGame"
+            ),
             from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
             recipient_list=[email],
             fail_silently=False,
         )
 
-        return Response({"message": "OTP sent successfully"}, status=status.HTTP_200_OK)
+        return Response(
+            {
+             "message": "OTP has been sent to your IITRPR email. Please enter it within 5 minutes to continue.",
+             "status": "success"
+            },
+            status=status.HTTP_200_OK
+            )
 
 
 class VerifyOTPView(generics.GenericAPIView):
+    
+    # Ignore any Authorization header for this public endpoint
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
     serializer_class = VerifyOTPSerializer
 
     def post(self, request):
@@ -60,15 +86,28 @@ class VerifyOTPView(generics.GenericAPIView):
             entry = None
 
         if not entry:
-            return Response({"error": "OTP not found"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {
+                    "error": "No OTP request was found for this email. Please request a new OTP to continue."
+                }, status=status.HTTP_400_BAD_REQUEST)
 
         if entry.is_expired():
-            return Response({"error": "OTP expired"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {
+                    "error": "Your OTP has expired. Please request a new one to complete your verification."
+                }, status=status.HTTP_400_BAD_REQUEST)
 
         if entry.otp != otp:
-            return Response({"error": "Invalid OTP"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {
+                    "error": "The OTP you entered is incorrect. Please try again with the correct code."
+                }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Optionally: delete or mark OTP as used. We'll delete to avoid reuse.
+
+        # Delete or mark OTP as used. delete to avoid reuse.
         entry.delete()
 
-        return Response({"message": "OTP verified successfully"}, status=status.HTTP_200_OK)
+        return Response(
+            {
+                "message": "OTP verified successfully"
+            }, status=status.HTTP_200_OK)
