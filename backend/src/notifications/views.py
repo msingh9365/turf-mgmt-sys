@@ -244,3 +244,69 @@ class BroadcastLookingForPlayersView(APIView):
         if hours12 == 0:
             hours12 = 12
         return f"{hours12}:{minutes:02d} {suffix}"
+
+
+class MarkNotificationAsReadView(APIView):
+    """
+    Mark a single notification as read.
+    PATCH /api/notifications/<id>/mark-read/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def patch(self, request, notification_id):
+        try:
+            notification = Notification.objects.get(id=notification_id, user=request.user)
+        except Notification.DoesNotExist:
+            return Response(
+                {'detail': 'Notification not found or you do not have permission to access it.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        notification.is_read = True
+        notification.save(update_fields=['is_read'])
+        
+        serializer = NotificationSerializer(notification)
+        logger.info(f"Notification {notification_id} marked as read by user {request.user.id}")
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class MarkAllNotificationsReadView(APIView):
+    """
+    Mark all notifications for the authenticated user as read.
+    POST /api/notifications/mark-all-read/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        updated_count = Notification.objects.filter(
+            user=request.user,
+            is_read=False
+        ).update(is_read=True)
+        
+        logger.info(f"User {request.user.id} marked {updated_count} notifications as read")
+        return Response(
+            {
+                'detail': f'{updated_count} notification(s) marked as read.',
+                'count': updated_count
+            },
+            status=status.HTTP_200_OK
+        )
+
+
+class UnreadNotificationCountView(APIView):
+    """
+    Get the count of unread notifications for the authenticated user.
+    GET /api/notifications/unread-count/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        unread_count = Notification.objects.filter(
+            user=request.user,
+            is_read=False
+        ).count()
+        
+        return Response(
+            {'unread_count': unread_count},
+            status=status.HTTP_200_OK
+        )
