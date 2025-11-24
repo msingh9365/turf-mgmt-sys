@@ -36,22 +36,27 @@ class SendNotificationView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
+        from .tasks import send_notification_async, broadcast_notification_async
+        
         title = request.data.get('title')
         body = request.data.get('body')
         data = request.data.get('data', {})
         user_id = request.data.get('user_id')
-        sender = FCMNotificationSender()
+        
         if user_id:
             User = get_user_model()
             try:
                 user = User.objects.get(id=user_id)
             except User.DoesNotExist:
                 return Response({'detail': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
-            sender.send_to_user(user, title, body, data)
+            # Send async to specific user
+            send_notification_async(user.id, title, body, data)
         else:
-            sender.broadcast(title, body, data)
-        logger.info(f"Notification sent: {title}")
-        return Response({'detail': 'Notification sent.'}, status=status.HTTP_200_OK)
+            # Broadcast async to all users
+            broadcast_notification_async(title, body, data)
+        
+        logger.info(f"Notification queued: {title}")
+        return Response({'detail': 'Notification queued for delivery.'}, status=status.HTTP_202_ACCEPTED)
 
 class NotificationHistoryView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -154,14 +159,12 @@ class BroadcastLookingForPlayersView(APIView):
             'user_email': user_email,
         }
 
-        # Send broadcast notification (exclude the sender)
-        sender = FCMNotificationSender()
-        results = sender.broadcast(title, body, data, exclude_user=user)
-        success_count = sum(1 for _, r in results if r)
-        failed_tokens = [t for t, r in results if not r]
+        # Send broadcast notification asynchronously (exclude the sender)
+        from .tasks import broadcast_notification_async
+        broadcast_notification_async(title, body, data, exclude_user_id=user.id)
 
         logger.info(
-            "Broadcast sent by user %s for %s on %s at slots %s",
+            "Broadcast queued by user %s for %s on %s at slots %s",
             user.id,
             sport.sport_name,
             date,
@@ -170,15 +173,13 @@ class BroadcastLookingForPlayersView(APIView):
 
         return Response(
             {
-                'detail': 'Broadcast notification sent successfully.',
-                'recipients': success_count,
-                'failed_tokens': failed_tokens,
+                'detail': 'Broadcast notification queued successfully.',
                 'sport': sport.sport_name,
                 'date': date,
                 'slot_time': slot_time_text,
                 'slot_times': slot_times,
             },
-            status=status.HTTP_200_OK
+            status=status.HTTP_202_ACCEPTED
         )
     
     def _format_slot_time(self, slot_id):
