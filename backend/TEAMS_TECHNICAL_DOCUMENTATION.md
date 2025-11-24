@@ -1,8 +1,8 @@
 # Teams Module - Technical Documentation
 
 **Last Updated:** 2025-11-24  
-**Version:** 1.0  
-**Status:** Production Ready with Placeholder Features
+**Version:** 2.0  
+**Status:** Production Ready - Core Features Complete (Member Management Implemented)
 
 ---
 
@@ -29,13 +29,17 @@
 The Teams module provides comprehensive team management functionality for the turf management system, enabling users to create sports teams, manage memberships, track achievements, and handle team-related invitations.
 
 ### Key Features
-✅ **Team Creation & Management** - Create teams with captain and members  
+✅ **Team Creation & Management** - Create teams with JWT-authenticated captains  
 ✅ **Sport-Specific Teams** - Teams linked to specific sports with min player validation  
-✅ **Member Management** - Add/track team members with role differentiation  
+✅ **Bulk Member Management** - Replace all members (except captain) atomically  
+✅ **Leave Team** - Members can leave (with min player validation)  
+✅ **Transfer Captaincy** - Transfer captain role to another member  
+✅ **Permission System** - Role-based access (captain, admin, member)  
 ✅ **Achievement Tracking** - JSON-based achievement storage (max 10 per team)  
 ✅ **Unique Team Names** - Database-enforced uniqueness across all teams  
 ✅ **Duplicate Prevention** - Automatic deduplication of member emails  
 ✅ **Performance Optimized** - Query optimization to prevent N+1 problems  
+✅ **Notification Integration** - FCM notifications for all member changes  
 🚧 **Invitation System** - API endpoints wired but not yet implemented  
 
 ### Tech Stack
@@ -273,13 +277,15 @@ class Invitation(models.Model):
 | Method | Endpoint | Status | Description |
 |--------|----------|--------|-------------|
 | GET | `/teams/` | ✅ Implemented | List all teams |
-| POST | `/teams/` | ✅ Implemented | Create a new team |
+| POST | `/teams/` | ✅ Implemented | Create a new team (JWT required) |
 | GET | `/teams/{id}/` | ✅ Implemented | Get team details with members |
 | GET | `/teams/by-sport/?sport_id={id}` | ✅ Implemented | List teams for a specific sport |
+| POST | `/teams/{team_id}/bulk-update-members/` | ✅ Implemented | Replace all members (captain/admin only) |
+| POST | `/teams/{team_id}/transfer-captain/` | ✅ Implemented | Transfer captaincy (captain/admin only) |
+| POST | `/teams/{id}/leave/` | ✅ Implemented | Leave a team (members only) |
 | POST | `/teams/{id}/invite-member/` | 🚧 Placeholder | Invite player to team |
 | POST | `/teams/{id}/request-to-join/` | 🚧 Placeholder | Request to join team |
 | POST | `/teams/{id}/remove-member/` | 🚧 Placeholder | Remove member from team |
-| POST | `/teams/{id}/leave/` | 🚧 Placeholder | Leave a team |
 | POST | `/invitations/match-invite/` | 🚧 Placeholder | Invite team for match |
 | POST | `/invitations/team-invite/{id}/respond/` | 🚧 Placeholder | Respond to team invitation |
 | POST | `/invitations/team-request/{id}/respond/` | 🚧 Placeholder | Respond to join request |
@@ -337,7 +343,7 @@ GET /api/teams/ HTTP/1.1
 ### 2. Create Team
 
 **Endpoint:** `POST /api/teams/`  
-**Authentication:** Currently uses fallback (first user), intended for JWT  
+**Authentication:** JWT required (authenticated user becomes captain)  
 **Description:** Creates a new team with captain and optional members
 
 **Request Body:**
@@ -560,9 +566,247 @@ GET /api/teams/by-sport/?sport_id=1 HTTP/1.1
 
 ---
 
-### 5. Placeholder Endpoints (Not Yet Implemented)
+### 5. Bulk Update Team Members
 
-All invitation and member management endpoints return:
+**Endpoint:** `POST /api/teams/{team_id}/bulk-update-members/`  
+**Authentication:** JWT required  
+**Authorization:** Team captain or admin users only  
+**Description:** Replace all team members (except captain) with a new list of members
+
+**Request Body:**
+```json
+{
+  "member_emails": [
+    "player1@example.com",
+    "player2@example.com",
+    "player3@example.com"
+  ]
+}
+```
+
+**Field Validation:**
+- `member_emails` (required) - Array of email addresses (non-empty)
+- Automatically deduplicates emails (case-insensitive)
+- Captain's email is ignored if included
+- Pre-validates minimum player count before any deletion
+
+**Response (200 OK):**
+```json
+{
+  "team_id": 1,
+  "team_name": "Thunder Hawks",
+  "member_count": 11,
+  "members_added": 8,
+  "members_removed": 10,
+  "message": "Team roster updated successfully"
+}
+```
+
+**Response with Warnings:**
+If some emails don't exist:
+```json
+{
+  "team_id": 1,
+  "team_name": "Thunder Hawks",
+  "member_count": 9,
+  "members_added": 6,
+  "members_removed": 10,
+  "failed_emails": ["notfound1@example.com", "notfound2@example.com"],
+  "warning": "2 email(s) not found: notfound1@example.com, notfound2@example.com",
+  "message": "Team roster updated successfully"
+}
+```
+
+**Error Responses:**
+
+**403 Forbidden - Not Authorized:**
+```json
+{
+  "message": "You do not have permission to perform this action. Only team captain or admin can update members."
+}
+```
+
+**400 Bad Request - Minimum Players:**
+```json
+{
+  "message": "Cannot update members. Minimum 11 players required for Soccer. You provided 8 total members."
+}
+```
+
+**400 Bad Request - Invalid Data:**
+```json
+{
+  "message": "Invalid request data: {'member_emails': ['This field is required.']}"
+}
+```
+
+**404 Not Found:**
+```json
+{
+  "message": "Team not found."
+}
+```
+
+**Business Logic:**
+- Complete replacement strategy: ALL existing members (except captain) are deleted
+- Captain is automatically preserved and never deleted
+- Atomic transaction: either all changes succeed or all fail
+- Member count is updated after changes
+- Notifications sent to all team members (existing + new)
+- Uses optimized database queries with indexed lookups
+
+---
+
+### 6. Leave Team
+
+**Endpoint:** `POST /api/teams/{id}/leave/`  
+**Authentication:** JWT required  
+**Authorization:** Must be a team member (but NOT the captain)  
+**Description:** Remove yourself from the team
+
+**No Request Body Required**
+
+**Response (200 OK):**
+```json
+{
+  "message": "You have successfully left Thunder Hawks",
+  "team_name": "Thunder Hawks"
+}
+```
+
+**Error Responses:**
+
+**403 Forbidden - Captain Cannot Leave:**
+```json
+{
+  "message": "Captain cannot leave the team. Transfer captaincy first."
+}
+```
+
+**403 Forbidden - Not a Member:**
+```json
+{
+  "message": "You are not a member of this team."
+}
+```
+
+**400 Bad Request - Minimum Players:**
+```json
+{
+  "message": "Cannot leave - team would fall below minimum player requirement of 11 for Soccer."
+}
+```
+
+**404 Not Found:**
+```json
+{
+  "message": "Team not found."
+}
+```
+
+**Business Logic:**
+- Validates user is a member but not captain
+- Calculates remaining member count before deletion
+- Rejects if leaving would violate sport's minimum player requirement
+- Atomic transaction: delete member record and update count
+- Notifications sent to remaining team members
+
+---
+
+### 7. Transfer Team Captaincy
+
+**Endpoint:** `POST /api/teams/{team_id}/transfer-captain/`  
+**Authentication:** JWT required  
+**Authorization:** Current captain or admin users only  
+**Description:** Transfer team captaincy to another existing team member
+
+**Request Body:**
+```json
+{
+  "new_captain_user_id": 25
+}
+```
+
+**Field Validation:**
+- `new_captain_user_id` (required) - Integer user ID
+- Must be an existing member of the team
+- Cannot be the current captain (already captain)
+
+**Response (200 OK):**
+```json
+{
+  "message": "Team captaincy transferred successfully",
+  "team_id": 1,
+  "team_name": "Thunder Hawks",
+  "old_captain": {
+    "user_id": 5,
+    "name": "John Doe"
+  },
+  "new_captain": {
+    "user_id": 25,
+    "name": "Jane Smith"
+  }
+}
+```
+
+**Error Responses:**
+
+**403 Forbidden - Not Authorized:**
+```json
+{
+  "message": "You do not have permission to perform this action. Only team captain or admin can transfer captaincy."
+}
+```
+
+**400 Bad Request - Already Captain:**
+```json
+{
+  "message": "The specified user is already the captain of this team."
+}
+```
+
+**400 Bad Request - Invalid Data:**
+```json
+{
+  "message": "Invalid request data: {'new_captain_user_id': ['This field is required.']}"
+}
+```
+
+**404 Not Found - Team:**
+```json
+{
+  "message": "Team not found."
+}
+```
+
+**404 Not Found - User:**
+```json
+{
+  "message": "New captain user does not exist."
+}
+```
+
+**404 Not Found - Not a Member:**
+```json
+{
+  "message": "New captain is not a member of this team."
+}
+```
+
+**Business Logic:**
+- Validates new captain is an existing team member
+- Atomic transaction updates three records:
+  1. Old captain's TeamMember role → 'player'
+  2. New captain's TeamMember role → 'captain'
+  3. Team.captain foreign key → new captain
+- Old captain remains as a regular member
+- Notifications sent to all team members
+
+---
+
+### 8. Placeholder Endpoints (Not Yet Implemented)
+
+The following invitation and member management endpoints return:
 
 **Response (501 Not Implemented):**
 ```json
@@ -575,7 +819,6 @@ These endpoints include:
 - `/teams/{id}/invite-member/`
 - `/teams/{id}/request-to-join/`
 - `/teams/{id}/remove-member/`
-- `/teams/{id}/leave/`
 - `/invitations/match-invite/`
 - `/invitations/team-invite/{id}/respond/`
 - `/invitations/team-request/{id}/respond/`
@@ -584,6 +827,56 @@ These endpoints include:
 ---
 
 ## Business Logic & Workflows
+
+### Permission System
+
+The Teams module implements a role-based permission system with three levels:
+
+**1. Captain Permissions**
+- Create team (becomes captain automatically)
+- Bulk update team members
+- Transfer captaincy to another member
+- Remove individual members (future feature)
+- Invite players to team (future feature)
+- Respond to join requests (future feature)
+
+**2. Admin Permissions (is_admin=True)**
+- All captain permissions on ANY team
+- Can bulk update members on any team
+- Can transfer captaincy on any team
+- Override captain-only restrictions
+
+**3. Member Permissions**
+- Leave team (if not captain and min_player maintained)
+- View team details
+- Request to join team (future feature)
+- Respond to invitations (future feature)
+
+**4. Public Permissions**
+- List all teams (no authentication required)
+- View team details (no authentication required)
+- List teams by sport (no authentication required)
+
+**Permission Helper Functions** (`teams/permissions.py`):
+```python
+def is_team_captain(user, team):
+    """Check if user is the captain of the team"""
+    return team.captain_id == user.id
+
+def is_admin_user(user):
+    """Check if user has admin privileges"""
+    return getattr(user, 'is_admin', False)
+
+def is_team_member(user, team):
+    """Check if user is a member of the team"""
+    return team.members.filter(user_id=user.id).exists()
+
+def can_modify_team(user, team):
+    """Check if user can modify team settings (captain or admin)"""
+    return is_team_captain(user, team) or is_admin_user(user)
+```
+
+---
 
 ### Team Creation Workflow
 
@@ -672,6 +965,154 @@ The system prevents duplicates at multiple levels:
        models.UniqueConstraint(fields=['team', 'user'], name='unique_team_member')
    ]
    ```
+
+---
+
+### Bulk Update Members Workflow
+
+```
+1. Validate Request & Authorization
+   ├─ Validate member_emails list format
+   ├─ Check user is captain OR admin
+   └─ Fetch team with related data
+
+2. Pre-Process Member Emails
+   ├─ Remove captain's email if present
+   ├─ Deduplicate emails (case-insensitive)
+   └─ Convert to lowercase
+
+3. Pre-Validation: Minimum Player Count
+   ├─ Calculate: total = 1 (captain) + len(new_members)
+   ├─ Get sport.min_player requirement
+   └─ Reject if total < min_player
+
+4. Lookup Users by Email
+   ├─ For each email:
+   │  ├─ Use optimized sort_key lookup
+   │  ├─ If found: Add to found_users list
+   │  └─ If not found: Add to failed_emails list
+   └─ Track successful and failed lookups
+
+5. Begin Atomic Transaction
+   ├─ Get existing member IDs (for notification)
+   ├─ Delete ALL members except captain
+   ├─ Bulk create new TeamMember records
+   └─ Update team.member_count
+
+6. Commit Transaction
+   └─ All changes succeed or all rollback
+
+7. Send Notifications
+   ├─ Notify all affected members (old + new)
+   ├─ Message: roster updated details
+   └─ Continue even if notification fails
+
+8. Return Response
+   ├─ Success data with counts
+   └─ Warning if failed_emails exist
+```
+
+---
+
+### Leave Team Workflow
+
+```
+1. Validate Request & Authorization
+   ├─ Check user is authenticated
+   ├─ Fetch team with related data
+   └─ Verify team exists
+
+2. Authorization Checks
+   ├─ Check user is NOT captain
+   │  └─ Reject: "Captain cannot leave. Transfer captaincy first."
+   └─ Check user IS a member
+      └─ Reject: "You are not a member of this team."
+
+3. Validate Minimum Player Count
+   ├─ Calculate: remaining = current_count - 1
+   ├─ Get sport.min_player requirement
+   └─ Reject if remaining < min_player
+
+4. Begin Atomic Transaction
+   ├─ Delete user's TeamMember record
+   └─ Update team.member_count
+
+5. Commit Transaction
+   └─ All changes succeed or all rollback
+
+6. Send Notifications
+   ├─ Notify remaining team members
+   ├─ Exclude user who left
+   └─ Message: "{user} has left the team"
+
+7. Return Success Response
+   └─ Confirmation message with team name
+```
+
+---
+
+### Transfer Captaincy Workflow
+
+```
+1. Validate Request & Authorization
+   ├─ Validate new_captain_user_id provided
+   ├─ Check user is captain OR admin
+   └─ Fetch team with related data
+
+2. Validate New Captain
+   ├─ Check new captain exists (User lookup)
+   ├─ Check new captain != current captain
+   └─ Check new captain is team member
+
+3. Begin Atomic Transaction
+   ├─ Update old captain's TeamMember.role → 'player'
+   ├─ Update new captain's TeamMember.role → 'captain'
+   └─ Update Team.captain → new captain
+
+4. Commit Transaction
+   └─ All three updates succeed or all rollback
+
+5. Send Notifications
+   ├─ Notify ALL team members
+   ├─ Message: "Captaincy transferred from X to Y"
+   └─ Include both old and new captain
+
+6. Return Success Response
+   ├─ Old captain details
+   └─ New captain details
+```
+
+---
+
+### Notification Integration
+
+All member management operations send notifications using the notifications module:
+
+```python
+from teams.notifications import send_team_notification
+
+# Usage
+send_team_notification(
+    team=team,
+    notification_type='ROSTER_UPDATED',  # or MEMBER_LEFT, CAPTAIN_CHANGED
+    message="Human-readable message",
+    exclude_user_ids=[user.id]  # Optional: exclude specific users
+)
+```
+
+**Notification Types:**
+- `ROSTER_UPDATED` - Bulk member update
+- `MEMBER_LEFT` - Member left team
+- `CAPTAIN_CHANGED` - Captaincy transferred
+- `MEMBER_ADDED` - Single member added (future)
+- `MEMBER_REMOVED` - Member removed (future)
+
+**Integration Details:**
+- Uses FCM (Firebase Cloud Messaging) via `notifications.utils.FCMNotificationSender`
+- Sends to all active devices for each team member
+- Creates persistent Notification records in database
+- Non-blocking: failures don't affect the main operation
+- Logs all notification attempts for debugging
 
 ---
 
@@ -935,6 +1376,11 @@ urlpatterns = [
 - `test_teams_api.py` - Core API functionality tests
 - `test_team_uniqueness.py` - Duplicate prevention tests
 - `test_integration.py` - Cross-module integration tests
+- `test_member_management.py` - Member management features (bulk update, leave, transfer captain)
+
+**Coverage Target:** ≥90% for all new code
+
+**Test Count:** 30+ tests covering all member management features
 
 ### Test Scenarios
 
@@ -990,6 +1436,99 @@ def test_nonexistent_user_skipping():
     # Include non-existent emails in member_emails
     # Verify team created with warning
     # Verify only existing users added
+```
+
+#### 5. Bulk Update Members Tests
+```python
+def test_bulk_update_by_captain_success():
+    # Captain successfully replaces all members
+    
+def test_bulk_update_by_admin_success():
+    # Admin can bulk update any team
+    
+def test_bulk_update_by_non_authorized_user_fails():
+    # Regular member cannot bulk update
+    
+def test_bulk_update_maintains_captain():
+    # Captain is never removed during bulk update
+    
+def test_bulk_update_validates_min_players():
+    # Rejects update that violates min player count
+    
+def test_bulk_update_deduplicates_emails():
+    # Duplicate emails are automatically deduplicated
+    
+def test_bulk_update_handles_nonexistent_users():
+    # Returns warning for emails that don't exist
+    
+def test_bulk_update_is_atomic():
+    # Verify all-or-nothing transaction behavior
+    
+def test_bulk_update_updates_member_count():
+    # Member count correctly updated after bulk update
+```
+
+#### 6. Leave Team Tests
+```python
+def test_member_can_leave_team():
+    # Regular member successfully leaves team
+    
+def test_captain_cannot_leave_team():
+    # Captain is blocked from leaving
+    
+def test_non_member_cannot_leave_team():
+    # Non-member cannot leave team they're not in
+    
+def test_leave_validates_min_players():
+    # Rejects leave if it violates min player count
+    
+def test_leave_updates_member_count():
+    # Member count correctly updated after leaving
+    
+def test_unauthenticated_user_cannot_leave():
+    # Requires authentication
+```
+
+#### 7. Transfer Captain Tests
+```python
+def test_captain_can_transfer_captaincy():
+    # Captain successfully transfers to another member
+    
+def test_admin_can_transfer_captaincy():
+    # Admin can transfer captaincy on any team
+    
+def test_regular_member_cannot_transfer_captaincy():
+    # Regular member is blocked
+    
+def test_transfer_to_non_member_fails():
+    # Cannot transfer to user not on team
+    
+def test_old_captain_becomes_player():
+    # Old captain becomes regular member after transfer
+    
+def test_transfer_updates_all_records():
+    # Team and both TeamMember records updated atomically
+```
+
+#### 8. Integration Tests
+```python
+def test_full_workflow_create_update_leave_transfer():
+    # Complete workflow testing all features together
+    
+def test_concurrent_bulk_updates():
+    # Test race conditions with atomic transactions
+    
+def test_notification_integration():
+    # Verify notifications sent for all operations
+```
+
+#### 9. Performance Tests
+```python
+def test_bulk_update_query_count():
+    # Ensure query count stays under 15
+    
+def test_bulk_update_performance_with_many_members():
+    # Should complete in under 2 seconds
 ```
 
 ### Running Tests

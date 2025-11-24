@@ -67,3 +67,40 @@ class TeamCreateSerializer(serializers.ModelSerializer):
         if len(member_emails) + 1 < sport.min_player:
             raise serializers.ValidationError({"member_emails": f"Minimum {sport.min_player} players required for {sport.sport_name}."})
         return attrs
+
+
+class BulkUpdateMembersSerializer(serializers.Serializer):
+    """Serializer for bulk updating team members."""
+    member_emails = serializers.ListField(
+        child=serializers.EmailField(),
+        required=True,
+        allow_empty=False,
+        help_text="List of member email addresses to replace existing members (except captain)"
+    )
+
+    def validate_member_emails(self, value):
+        """Validate member emails list."""
+        if not value:
+            raise serializers.ValidationError("At least one member email is required")
+        
+        # Deduplicate (case-insensitive)
+        unique_emails = list(set(email.strip().lower() for email in value if email and email.strip()))
+        
+        if not unique_emails:
+            raise serializers.ValidationError("No valid email addresses provided")
+        
+        return unique_emails
+
+
+class TransferCaptainSerializer(serializers.Serializer):
+    """Serializer for transferring team captaincy."""
+    new_captain_user_id = serializers.IntegerField(
+        required=True,
+        help_text="User ID of the new captain (must be an existing team member)"
+    )
+
+    def validate_new_captain_user_id(self, value):
+        """Validate new captain user ID."""
+        if value <= 0:
+            raise serializers.ValidationError("Invalid user ID")
+        return value
