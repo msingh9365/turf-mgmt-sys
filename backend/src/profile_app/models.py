@@ -5,10 +5,21 @@ from django.dispatch import receiver
 
 # Your custom User model lives in users.models (as you shared)
 from users.models import User
+from bookings.models import Sport
 
 
 class Profile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="profile")
+    # User's interested sports (many-to-many to central Sport model)
+    interested_sports = models.ManyToManyField(
+        Sport,
+        related_name="interested_profiles",
+        blank=True,
+        help_text="Sports user is interested in (frontend will store IDs)"
+    )
+
+    # Avatar selected by the user (frontend provides an `avatar_id` or filename)
+    avatar_id = models.CharField(max_length=200, blank=True, null=True, help_text="Avatar identifier selected by user")
 
     class Meta:
         db_table = "user_profile"  # ✅ Clean custom table name

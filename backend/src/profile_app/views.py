@@ -13,6 +13,7 @@ from teams.models import Team, TeamMember
 from .models import Profile, Achievement
 from .serializers import (
     ProfileSerializer,
+    ProfileEditSerializer,
     ProfileUpdateSerializer,
     AchievementSerializer,
 )
@@ -38,22 +39,31 @@ def get_user_teams(user: User) -> QuerySet[Team]:
 class ProfileView(APIView):
     """
     GET  -> Fetch the logged-in user's full profile (user info, team, achievements)
-    PUT  -> Update basic user details (name, phone) from the profile page
+    PUT  -> Update profile details (name, phone, interested_sports, avatar_id)
     """
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        # Check if this is edit mode (for optimized response)
+        edit_mode = request.query_params.get('edit', 'false').lower() == 'true'
+        
         # Ensure a profile exists for this user
         profile, _ = Profile.objects.get_or_create(user=request.user)
 
         # Fetch all teams user belongs to (as member or captain)
         teams_qs = get_user_teams(request.user).order_by("-created_at")
 
-        # Serialize and return data
-        serializer = ProfileSerializer(profile, context={"teams_queryset": teams_qs})
+        # Use appropriate serializer based on mode
+        if edit_mode:
+            serializer = ProfileEditSerializer(profile, context={"teams_queryset": teams_qs})
+            message = "Profile fetched for editing."
+        else:
+            serializer = ProfileSerializer(profile, context={"teams_queryset": teams_qs})
+            message = "Profile fetched successfully."
+            
         return Response(
             {
-                "message": "Profile fetched successfully.",
+                "message": message,
                 "profile": serializer.data,
             },
             status=status.HTTP_200_OK,
@@ -63,9 +73,9 @@ class ProfileView(APIView):
         # Ensure a profile exists
         profile, _ = Profile.objects.get_or_create(user=request.user)
 
-        # Validate and update profile/user details
+        # Validate and update profile/user details (all fields required)
         serializer = ProfileUpdateSerializer(
-            instance=profile, data=request.data, partial=True
+            instance=profile, data=request.data
         )
         serializer.is_valid(raise_exception=True)
         serializer.save()
