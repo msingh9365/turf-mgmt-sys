@@ -33,6 +33,13 @@ env = environ.Env(
     SUPABASE_URL=(str, ""),
     SUPABASE_KEY=(str, ""),
     SUPABASE_JWT_SECRET=(str, ""),
+    # Brevo (Sendinblue) API settings
+    BREVO_API_KEY=(str, ""),
+    DEFAULT_FROM_EMAIL=(str, ""),
+    REDIS_HOST=(str, "localhost"),
+    REDIS_PORT=(int, 6379),
+    REDIS_PASSWORD=(str, ""),
+    REDIS_DB=(int, 0),
 )
 
 # Load .env if present at project root
@@ -69,6 +76,13 @@ INSTALLED_APPS = [
 
     # Local apps
     "users",
+    'otp',
+
+    "bookings",
+    "events",
+    "teams",
+    "notifications",  # Notification system for FCM
+    "profile_app",
 ]
 # FCM configuration
 # Add FCM_SERVER_KEY to your .env file:
@@ -200,4 +214,47 @@ ALLOWED_EMAIL_DOMAIN = env("ALLOWED_EMAIL_DOMAIN")
 # Google OAuth client configuration for Android
 GOOGLE_CLIENT_ID_ANDROID = env("GOOGLE_CLIENT_ID_ANDROID")
 GOOGLE_CLIENT_ID_WEB = env("GOOGLE_CLIENT_ID_WEB")
-GOOGLE_CLIENT_SECRET_WEB = env("GOOGLE_CLIENT_SECRET_WEB")
+
+# Brevo (Sendinblue) API configuration
+BREVO_API_KEY = env("BREVO_API_KEY")
+DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL")
+
+# Redis configuration
+REDIS_HOST = env("REDIS_HOST")
+REDIS_PORT = env("REDIS_PORT")
+REDIS_PASSWORD = env("REDIS_PASSWORD")
+REDIS_DB = env("REDIS_DB")
+
+# Cache configuration
+# Use Redis in production by default. In local dev/tests, prefer LocMem unless explicitly enabled.
+RUNNING_TESTS = "PYTEST_CURRENT_TEST" in os.environ
+USE_REDIS_CACHE = env.bool("USE_REDIS_CACHE", default=not DEBUG and not RUNNING_TESTS)
+
+if USE_REDIS_CACHE:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": (
+                f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+                if REDIS_PASSWORD
+                else f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+            ),
+            "KEY_PREFIX": "turf_mgmt",
+            "TIMEOUT": 300,
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "turf_mgmt_locmem",
+            "TIMEOUT": 300,
+        }
+    }
+
+
+# ---------------------------------------------------------------------------
+# Events app configuration
+# ---------------------------------------------------------------------------
+# This tells the events app to use the Sport model from the bookings app.
+SPORT_MODEL = "bookings.Sport"

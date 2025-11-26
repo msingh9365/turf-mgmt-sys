@@ -1,7 +1,7 @@
 from django.db import models
 from django.utils import timezone
 from django.conf import settings
-from bookings.models import Sport
+from bookings.models import Sport, Ground
 
 class Team(models.Model):
     team_id = models.AutoField(primary_key=True)
@@ -88,6 +88,11 @@ class Invitation(models.Model):
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='SENT')
     expiry_time = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    match_details = models.JSONField(
+        null=True, 
+        blank=True,
+        help_text="For MATCH_INVITE type: stores sender_team_id, sender_captain_email, message, preferred_date, ground_id"
+    )
 
     def __str__(self):
         return f"Invitation ({self.get_type_display()}) to {getattr(self.recipient, 'name', str(self.recipient))}"

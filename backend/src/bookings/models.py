@@ -99,6 +99,11 @@ class Slot(models.Model):
         
         # Unique constraint for slot per ground per date
         unique_together = ("ground", "date", "slot_id")
+        
+        # Composite index for optimizing booked slot queries
+        indexes = [
+            models.Index(fields=["ground", "date", "booked"], name="idx_slot_booked_lookup"),
+        ]
     
     def __str__(self):
         return f"Slot {self.slot_id} - Ground {self.ground.ground_id} - {self.date}"

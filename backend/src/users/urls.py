@@ -12,7 +12,6 @@ urlpatterns = [
     path("auth/google/android/", google_sign_in_android, name="auth-google-android"),
     path("auth/token/refresh/", TokenRefreshView.as_view(), name="token-refresh"),
 
-    # Profile
+    # User basic info endpoint (deprecated - use /api/profile/me/ instead)
     path("user/me/", MeView.as_view(), name="user-me"),
-    path("profile/me/", MeView.as_view(), name="profile-me"),
 ]
