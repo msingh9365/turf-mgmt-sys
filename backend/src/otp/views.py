@@ -7,9 +7,10 @@ from rest_framework.response import Response
 from rest_framework import status, generics
 from rest_framework.permissions import AllowAny
 from .models import EmailOTP
-from django.core.mail import send_mail
 from django.conf import settings
 from .serializers import SendOTPSerializer, VerifyOTPSerializer
+import sib_api_v3_sdk
+from sib_api_v3_sdk.rest import ApiException
 
 
 class SendOTPView(generics.GenericAPIView):
@@ -39,23 +40,40 @@ class SendOTPView(generics.GenericAPIView):
         # Save OTP
         EmailOTP.objects.create(email=email, otp=otp, expires_at=EmailOTP.expiry_time(5))
 
-        # Send Email
-        send_mail(
-            subject="Your OTP Code",
-            message=
-            (
-                f"Dear User,\n\n"
-                f"Your One-Time Password (OTP) for accessing the IIT Ropar Sports Booking System "
-                f"is: {otp}\n\n"
-                f"This OTP is valid for the next 5 minutes and is required to verify your identity "
-                f"before you can continue with secure login and booking operations.\n\n"
-                f"Thank you for using the Proximity-Based Sports Networking & Turf Management System.\n"
-                f"Team EndGame"
-            ),
-            from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
-            recipient_list=[email],
-            fail_silently=False,
-        )
+        # Send Email using Brevo API
+        try:
+            configuration = sib_api_v3_sdk.Configuration()
+            configuration.api_key['api-key'] = settings.BREVO_API_KEY
+            
+            api_instance = sib_api_v3_sdk.TransactionalEmailsApi(sib_api_v3_sdk.ApiClient(configuration))
+            
+            send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
+                to=[{"email": email}],
+                sender={"email": settings.DEFAULT_FROM_EMAIL, "name": "IIT Ropar Sports"},
+                subject="Your OTP Code",
+                text_content=(
+                    f"Dear User,\n\n"
+                    f"Your One-Time Password (OTP) for accessing the IIT Ropar Sports Booking System "
+                    f"is: {otp}\n\n"
+                    f"This OTP is valid for the next 5 minutes and is required to verify your identity "
+                    f"before you can continue with secure login and booking operations.\n\n"
+                    f"Thank you for using the Proximity-Based Sports Networking & Turf Management System.\n"
+                    f"Team EndGame"
+                )
+            )
+            
+            api_instance.send_transac_email(send_smtp_email)
+            
+        except ApiException as e:
+            return Response(
+                {"error": f"Failed to send email: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to send email: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
         return Response(
             {
