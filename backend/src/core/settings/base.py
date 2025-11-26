@@ -33,10 +33,6 @@ env = environ.Env(
     SUPABASE_URL=(str, ""),
     SUPABASE_KEY=(str, ""),
     SUPABASE_JWT_SECRET=(str, ""),
-    REDIS_HOST=(str, "localhost"),
-    REDIS_PORT=(int, 6379),
-    REDIS_PASSWORD=(str, ""),
-    REDIS_DB=(int, 0),
 )
 
 # Load .env if present at project root
@@ -73,10 +69,6 @@ INSTALLED_APPS = [
 
     # Local apps
     "users",
-    "bookings",
-    "teams",
-    "notifications",  # Notification system for FCM
-    "profile_app",
 ]
 # FCM configuration
 # Add FCM_SERVER_KEY to your .env file:
@@ -84,6 +76,7 @@ INSTALLED_APPS = [
 FCM_SERVER_KEY = env("FCM_SERVER_KEY", default=None)
 
 MIDDLEWARE = [
+    "core.middleware.StripAuthForOtpMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -208,36 +201,3 @@ ALLOWED_EMAIL_DOMAIN = env("ALLOWED_EMAIL_DOMAIN")
 GOOGLE_CLIENT_ID_ANDROID = env("GOOGLE_CLIENT_ID_ANDROID")
 GOOGLE_CLIENT_ID_WEB = env("GOOGLE_CLIENT_ID_WEB")
 GOOGLE_CLIENT_SECRET_WEB = env("GOOGLE_CLIENT_SECRET_WEB")
-
-# Redis configuration
-REDIS_HOST = env("REDIS_HOST")
-REDIS_PORT = env("REDIS_PORT")
-REDIS_PASSWORD = env("REDIS_PASSWORD")
-REDIS_DB = env("REDIS_DB")
-
-# Cache configuration
-# Use Redis in production by default. In local dev/tests, prefer LocMem unless explicitly enabled.
-RUNNING_TESTS = "PYTEST_CURRENT_TEST" in os.environ
-USE_REDIS_CACHE = env.bool("USE_REDIS_CACHE", default=not DEBUG and not RUNNING_TESTS)
-
-if USE_REDIS_CACHE:
-    CACHES = {
-        "default": {
-            "BACKEND": "django.core.cache.backends.redis.RedisCache",
-            "LOCATION": (
-                f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
-                if REDIS_PASSWORD
-                else f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
-            ),
-            "KEY_PREFIX": "turf_mgmt",
-            "TIMEOUT": 300,
-        }
-    }
-else:
-    CACHES = {
-        "default": {
-            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-            "LOCATION": "turf_mgmt_locmem",
-            "TIMEOUT": 300,
-        }
-    }

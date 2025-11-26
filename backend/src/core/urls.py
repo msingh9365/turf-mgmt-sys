@@ -16,4 +16,11 @@ urlpatterns = [
     path("api/notifications/", include("notifications.urls")),  # /api/notifications/
     path("api/", include("profile_app.urls")),          # /api/profile/, /api/profile/achievements/
 
+    # API routes
+    path("api/", include("users.urls")),
+    path("api/", include("bookings.urls")),
+    path("api/", include("teams.urls")),
+    path("api/notifications/", include("notifications.urls")),
+    # OTP endpoints (available under /api/otp/...)
+    path("api/otp/", include("otp.urls")),
 ]
