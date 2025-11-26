@@ -16,8 +16,10 @@ urlpatterns = [
     path("teams/<int:team_id>/transfer-captain/", views.transfer_captain, name="team-transfer-captain"),
 
     # Invitations
-    path("invitations/match-invite/", views.invite_team_for_match, name="match-invite"),
-    path("invitations/team-invite/<int:id>/respond/", views.respond_to_team_invitation, name="respond-to-team-invite"),
-    path("invitations/team-request/<int:id>/respond/", views.respond_to_join_request, name="respond-to-team-request"),
-    path("invitations/match-invite/<int:id>/respond/", views.respond_to_match_invitation, name="respond-to-match-invite"),
+    path("teams/invitations/match-invite/", views.invite_team_for_match, name="match-invite"),
+    path("teams/invitations/sent/", views.list_sent_invitations, name="list-sent-invitations"),
+    path("teams/invitations/received/", views.list_received_invitations, name="list-received-invitations"),
+    path("teams/invitations/team-invite/<int:id>/respond/", views.respond_to_team_invitation, name="respond-to-team-invite"),
+    path("teams/invitations/team-request/<int:id>/respond/", views.respond_to_join_request, name="respond-to-team-request"),
+    path("teams/invitations/match-invite/<int:id>/respond/", views.respond_to_match_invitation, name="respond-to-match-invite"),
 ]

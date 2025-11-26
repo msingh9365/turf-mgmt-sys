@@ -104,3 +104,87 @@ class TransferCaptainSerializer(serializers.Serializer):
         if value <= 0:
             raise serializers.ValidationError("Invalid user ID")
         return value
+
+
+class MatchInviteSerializer(serializers.Serializer):
+    """Serializer for creating match invitations."""
+    target_team_id = serializers.IntegerField(
+        required=True,
+        help_text="ID of the team to invite"
+    )
+    message = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=500,
+        help_text="Optional message to include with the invitation"
+    )
+    preferred_date = serializers.DateField(
+        required=False,
+        allow_null=True,
+        help_text="Optional preferred match date (YYYY-MM-DD format)"
+    )
+    ground_id = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        help_text="Optional preferred ground/venue ID"
+    )
+
+    def validate_target_team_id(self, value):
+        """Validate target team exists."""
+        if value <= 0:
+            raise serializers.ValidationError("Invalid team ID")
+        try:
+            Team.objects.get(team_id=value)
+        except Team.DoesNotExist:
+            raise serializers.ValidationError("Target team does not exist")
+        return value
+
+    def validate_ground_id(self, value):
+        """Validate ground exists if provided."""
+        if value is not None and value > 0:
+            from bookings.models import Ground
+            try:
+                Ground.objects.get(ground_id=value)
+            except Ground.DoesNotExist:
+                raise serializers.ValidationError("Ground does not exist")
+        return value
+
+    def validate(self, attrs):
+        """Cross-field validation."""
+        # Additional validation will be done in the view for:
+        # - sender is captain
+        # - not inviting own team
+        # - same sport check
+        return attrs
+
+
+class InvitationDetailSerializer(serializers.ModelSerializer):
+    """Serializer for displaying invitation details."""
+    sender_name = serializers.CharField(source='sender.name', read_only=True)
+    sender_email = serializers.CharField(source='sender.email', read_only=True)
+    recipient_name = serializers.CharField(source='recipient.name', read_only=True)
+    recipient_email = serializers.CharField(source='recipient.email', read_only=True)
+    team_name = serializers.CharField(source='related_team.team_name', read_only=True)
+    sport_name = serializers.CharField(source='related_team.sport.sport_name', read_only=True)
+    type_display = serializers.CharField(source='get_type_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+
+    class Meta:
+        model = Invitation
+        fields = [
+            'invitation_id',
+            'sender_name',
+            'sender_email',
+            'recipient_name',
+            'recipient_email',
+            'type',
+            'type_display',
+            'team_name',
+            'sport_name',
+            'status',
+            'status_display',
+            'match_details',
+            'created_at',
+            'expiry_time',
+        ]
+        read_only_fields = fields

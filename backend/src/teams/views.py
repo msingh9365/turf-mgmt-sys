@@ -9,7 +9,12 @@ from teams.models import Team, Invitation, TeamMember
 from bookings.models import Sport
 from teams.permissions import is_team_captain, is_admin_user, is_team_member, can_modify_team
 from teams.notifications import send_team_notification
-from teams.serializers import BulkUpdateMembersSerializer, TransferCaptainSerializer
+from teams.serializers import (
+    BulkUpdateMembersSerializer, 
+    TransferCaptainSerializer,
+    MatchInviteSerializer,
+    InvitationDetailSerializer
+)
 import logging
 
 User = get_user_model()
@@ -582,7 +587,163 @@ def transfer_captain(request, team_id):
 @api_view(["POST"])
 @permission_classes([permissions.IsAuthenticated])
 def invite_team_for_match(request):
-    return Response({"detail": "Invite team for match not implemented yet."}, status=status.HTTP_501_NOT_IMPLEMENTED)
+    """
+    Send a match invitation from one team to another.
+    
+    POST /api/teams/invitations/match-invite/
+    Body: {
+        "target_team_id": 2,
+        "message": "Let's play this Saturday!",  // optional
+        "preferred_date": "2025-12-01",  // optional (YYYY-MM-DD)
+        "ground_id": 1  // optional
+    }
+    
+    Rules:
+    - Only team captains can send match invitations
+    - Cannot invite own team
+    - Teams must play the same sport
+    - All members of target team receive notification
+    """
+    # Validate request data
+    serializer = MatchInviteSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(
+            {"message": "Invalid request data", "errors": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    target_team_id = serializer.validated_data['target_team_id']
+    message = serializer.validated_data.get('message', '')
+    preferred_date = serializer.validated_data.get('preferred_date')
+    ground_id = serializer.validated_data.get('ground_id')
+    
+    # Get sender's team where they are captain
+    try:
+        sender_team = Team.objects.select_related('captain', 'sport').get(captain=request.user)
+    except Team.DoesNotExist:
+        return Response(
+            {"message": "You must be a team captain to send match invitations."},
+            status=status.HTTP_403_FORBIDDEN
+        )
+    
+    # Get target team
+    try:
+        target_team = Team.objects.select_related('captain', 'sport').prefetch_related('members__user').get(team_id=target_team_id)
+    except Team.DoesNotExist:
+        return Response(
+            {"message": "Target team not found."},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    # Prevent self-invitation
+    if sender_team.team_id == target_team.team_id:
+        return Response(
+            {"message": "Cannot invite your own team."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    # Check same sport
+    if sender_team.sport_id != target_team.sport_id:
+        return Response(
+            {"message": f"Teams must play the same sport. Your team plays {sender_team.sport.sport_name}, target team plays {target_team.sport.sport_name}."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    # Prepare match details
+    match_details = {
+        'sender_team_id': sender_team.team_id,
+        'sender_team_name': sender_team.team_name,
+        'sender_captain_email': request.user.email,
+        'sender_captain_name': getattr(request.user, 'name', request.user.email),
+    }
+    
+    if message:
+        match_details['message'] = message
+    if preferred_date:
+        match_details['preferred_date'] = str(preferred_date)
+    if ground_id:
+        from bookings.models import Ground
+        try:
+            ground = Ground.objects.get(ground_id=ground_id)
+            match_details['ground_id'] = ground_id
+            match_details['ground_name'] = ground.ground_name
+        except Ground.DoesNotExist:
+            pass  # Already validated in serializer
+    
+    try:
+        with transaction.atomic():
+            # Create invitation record
+            invitation = Invitation.objects.create(
+                sender=request.user,
+                recipient=target_team.captain,
+                type='MATCH_INVITE',
+                related_team=target_team,
+                status='SENT',
+                match_details=match_details
+            )
+            
+            # Build notification message
+            notification_title = f"Match Invitation from {sender_team.team_name}"
+            notification_body = f"{sender_team.team_name} wants to play a match with your team ({target_team.team_name})."
+            
+            if message:
+                notification_body += f"\n\nMessage: {message}"
+            
+            if preferred_date:
+                notification_body += f"\n\nPreferred Date: {preferred_date}"
+            
+            if ground_id and 'ground_name' in match_details:
+                notification_body += f"\nVenue: {match_details['ground_name']}"
+            
+            notification_body += f"\n\nContact {match_details['sender_captain_name']} at {request.user.email} to arrange the match."
+            
+            # Send notification to all target team members
+            notification_data = {
+                'type': 'MATCH_INVITE_RECEIVED',
+                'invitation_id': str(invitation.invitation_id),
+                'sender_team_id': str(sender_team.team_id),
+                'sender_team_name': sender_team.team_name,
+                'sender_captain_email': request.user.email,
+                'sender_captain_name': match_details['sender_captain_name'],
+            }
+            
+            if preferred_date:
+                notification_data['preferred_date'] = str(preferred_date)
+            if ground_id:
+                notification_data['ground_id'] = str(ground_id)
+                notification_data['ground_name'] = match_details.get('ground_name', '')
+            
+            # Use send_team_notification to notify all target team members
+            notified_count = send_team_notification(
+                team=target_team,
+                notification_type='MATCH_INVITE_RECEIVED',
+                message=notification_body,
+                exclude_user_ids=[],
+                title=notification_title,
+                data=notification_data
+            )
+            
+            logger.info(
+                f"Match invitation created: {sender_team.team_name} -> {target_team.team_name}. "
+                f"Notified {notified_count} members."
+            )
+            
+            return Response(
+                {
+                    "message": "Match invitation sent successfully.",
+                    "invitation_id": invitation.invitation_id,
+                    "target_team": target_team.team_name,
+                    "members_notified": notified_count
+                },
+                status=status.HTTP_201_CREATED
+            )
+    
+    except Exception as e:
+        logger.error(f"Error creating match invitation: {str(e)}")
+        return Response(
+            {"message": "Failed to send match invitation. Please try again."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 
 @api_view(["POST"])
@@ -636,3 +797,92 @@ def list_teams_by_sport(request):
     # Use values to return lean dicts and avoid extra attribute access
     data = list(qs.values("team_id", "team_name"))
     return Response(data, status=status.HTTP_200_OK)
+
+
+@api_view(["GET"])
+@permission_classes([permissions.IsAuthenticated])
+def list_sent_invitations(request):
+    """
+    List all match invitations sent by the requesting user's captained teams.
+    
+    GET /api/teams/invitations/sent/
+    
+    Returns:
+        List of invitations with full details including team names, recipient info,
+        match details, and status
+    """
+    # Get teams where the requesting user is captain
+    captained_teams = Team.objects.filter(captain=request.user)
+    
+    if not captained_teams.exists():
+        return Response(
+            {"message": "You are not a captain of any team.", "invitations": []},
+            status=status.HTTP_200_OK
+        )
+    
+    # Get all match invitations sent by the user
+    invitations = (
+        Invitation.objects
+        .filter(
+            sender=request.user,
+            type='MATCH_INVITE'
+        )
+        .select_related('sender', 'recipient', 'related_team__sport')
+        .order_by('-created_at')
+    )
+    
+    serializer = InvitationDetailSerializer(invitations, many=True)
+    
+    return Response(
+        {
+            "message": "Sent invitations retrieved successfully.",
+            "count": invitations.count(),
+            "invitations": serializer.data
+        },
+        status=status.HTTP_200_OK
+    )
+
+
+@api_view(["GET"])
+@permission_classes([permissions.IsAuthenticated])
+def list_received_invitations(request):
+    """
+    List all pending match invitations received by teams where the requesting user is captain.
+    
+    GET /api/teams/invitations/received/
+    
+    Returns:
+        List of pending invitations with full details including sender team info,
+        match details, and captain contact information
+    """
+    # Get teams where the requesting user is captain
+    captained_teams = Team.objects.filter(captain=request.user)
+    
+    if not captained_teams.exists():
+        return Response(
+            {"message": "You are not a captain of any team.", "invitations": []},
+            status=status.HTTP_200_OK
+        )
+    
+    # Get all match invitations received by the user (as team captain)
+    invitations = (
+        Invitation.objects
+        .filter(
+            recipient=request.user,
+            type='MATCH_INVITE',
+            status='SENT'  # Only show pending invitations
+        )
+        .select_related('sender', 'recipient', 'related_team__sport')
+        .order_by('-created_at')
+    )
+    
+    serializer = InvitationDetailSerializer(invitations, many=True)
+    
+    return Response(
+        {
+            "message": "Received invitations retrieved successfully.",
+            "count": invitations.count(),
+            "invitations": serializer.data
+        },
+        status=status.HTTP_200_OK
+    )

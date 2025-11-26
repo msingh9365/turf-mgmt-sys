@@ -10,7 +10,7 @@ from notifications.utils import FCMNotificationSender
 logger = logging.getLogger(__name__)
 
 
-def send_team_notification(team, notification_type, message, exclude_user_ids=None):
+def send_team_notification(team, notification_type, message, exclude_user_ids=None, title=None, data=None):
     """
     Send notification to all members of a team.
     
@@ -20,10 +20,13 @@ def send_team_notification(team, notification_type, message, exclude_user_ids=No
     Args:
         team: Team instance to notify
         notification_type: String identifier for notification type
-            Examples: 'MEMBER_ADDED', 'MEMBER_REMOVED', 'CAPTAIN_CHANGED', 'MEMBER_LEFT'
+            Examples: 'MEMBER_ADDED', 'MEMBER_REMOVED', 'CAPTAIN_CHANGED', 'MEMBER_LEFT', 'MATCH_INVITE_RECEIVED'
         message: Human-readable message to send
         exclude_user_ids: Optional list of user IDs to exclude from notification
             (e.g., exclude the user who triggered the action)
+        title: Optional custom title for notification (defaults to "Team Update: {team_name}")
+        data: Optional custom data dictionary to include in notification payload
+            (defaults to basic team info + notification_type)
     
     Returns:
         int: Number of users successfully notified
@@ -46,12 +49,20 @@ def send_team_notification(team, notification_type, message, exclude_user_ids=No
     fcm_sender = FCMNotificationSender()
     
     # Prepare notification data
-    title = f"Team Update: {team.team_name}"
-    data = {
-        'team_id': str(team.team_id),
-        'team_name': team.team_name,
-        'notification_type': notification_type,
-    }
+    if title is None:
+        title = f"Team Update: {team.team_name}"
+    
+    if data is None:
+        data = {
+            'team_id': str(team.team_id),
+            'team_name': team.team_name,
+            'notification_type': notification_type,
+        }
+    else:
+        # Ensure team info and notification_type are always present
+        data.setdefault('team_id', str(team.team_id))
+        data.setdefault('team_name', team.team_name)
+        data.setdefault('notification_type', notification_type)
     
     # Send to each member (except excluded users)
     notified_count = 0
