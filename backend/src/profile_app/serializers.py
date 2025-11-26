@@ -16,7 +16,7 @@ class SportSerializer(serializers.ModelSerializer):
 class TeamBriefSerializer(serializers.ModelSerializer):
     """Lightweight serializer for team details on the profile page."""
 
-    team_id = serializers.IntegerField(source="id", read_only=True)
+    team_id = serializers.IntegerField(read_only=True)
     team_name = serializers.CharField(read_only=True)
     sport_name = serializers.SerializerMethodField()
     captain_name = serializers.SerializerMethodField()
