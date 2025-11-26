@@ -96,7 +96,11 @@ class BroadcastLookingForPlayersView(APIView):
                 )
 
         if slot_id is not None:
-            normalized_slot_ids.append(slot_id)
+            # Handle slot_id being a list or single value
+            if isinstance(slot_id, (list, tuple)):
+                normalized_slot_ids.extend(slot_id)
+            else:
+                normalized_slot_ids.append(slot_id)
 
         # Coerce to strings then ints where possible to be tolerant of input types
         coerced_slot_ids = []
