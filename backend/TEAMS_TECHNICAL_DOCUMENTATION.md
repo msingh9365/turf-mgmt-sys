@@ -404,9 +404,15 @@ If some member emails don't exist in the system:
   "member_count": 2,
   "created_at": "2024-11-24T10:00:00Z",
   "achievements": [],
-  "warning": "Team created but 2 member(s) not found: nonexistent1@example.com, nonexistent2@example.com"
+  "warning": "Team created but 2 member(s) not found and were not added.",
+  "rejected_members": [
+    "nonexistent1@example.com",
+    "nonexistent2@example.com"
+  ]
 }
 ```
+
+**Note:** The `rejected_members` array contains the email addresses of users who are not registered in the system and were therefore not added to the team. The captain can use this information to inform those users to register before being added to the team.
 
 **Error Responses:**
 

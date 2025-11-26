@@ -128,9 +128,10 @@ def list_or_create_team(request):
                 "achievements": team.achievements,
             }
             
-            # Add warning if some members weren't added
+            # Add warning if some members weren't added with email details
             if failed_emails:
-                team_data["warning"] = f"Team created but {len(failed_emails)} member(s) not found: {', '.join(failed_emails)}"
+                team_data["warning"] = f"Team created but {len(failed_emails)} member(s) not found and were not added."
+                team_data["rejected_members"] = failed_emails
 
             return Response(team_data, status=status.HTTP_201_CREATED)
 

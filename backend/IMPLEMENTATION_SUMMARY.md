@@ -74,6 +74,17 @@ Successfully implemented 4 advanced member management features for the Teams mod
 - ✅ Achievements validation (max 10, must have title)
 - ✅ Atomic transaction already in place
 - ✅ All existing functionality preserved
+- ✅ **NEW:** Returns `rejected_members` array with email details for non-registered users
+
+**Response Enhancement:**
+When creating a team, if any member emails are not found in the system:
+```json
+{
+  "team_id": 5,
+  "warning": "Team created but 2 member(s) not found and were not added.",
+  "rejected_members": ["notregistered@example.com", "invalid@example.com"]
+}
+```
 
 **No Breaking Changes:** Backward compatible with existing API
 
