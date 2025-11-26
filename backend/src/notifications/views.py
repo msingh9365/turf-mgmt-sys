@@ -188,30 +188,53 @@ class BroadcastLookingForPlayersView(APIView):
     
     def _format_slot_time(self, slot_id):
         """
-        Convert slot_id to readable 12-hour start time.
-        Slots start at 8:00 AM. Slot 1 = 8:00 AM - 8:30 AM, ... Slot 28 = 9:30 PM - 10:00 PM.
+        Convert slot_id to readable time range.
+        Slot 1 = 8:00 AM - 8:30 AM, ... Slot 28 = 9:30 PM - 10:00 PM.
         """
+        slot_map = {
+            1: "8:00 AM - 8:30 AM",
+            2: "8:30 AM - 9:00 AM",
+            3: "9:00 AM - 9:30 AM",
+            4: "9:30 AM - 10:00 AM",
+            5: "10:00 AM - 10:30 AM",
+            6: "10:30 AM - 11:00 AM",
+            7: "11:00 AM - 11:30 AM",
+            8: "11:30 AM - 12:00 PM",
+            9: "12:00 PM - 12:30 PM",
+            10: "12:30 PM - 1:00 PM",
+            11: "1:00 PM - 1:30 PM",
+            12: "1:30 PM - 2:00 PM",
+            13: "2:00 PM - 2:30 PM",
+            14: "2:30 PM - 3:00 PM",
+            15: "3:00 PM - 3:30 PM",
+            16: "3:30 PM - 4:00 PM",
+            17: "4:00 PM - 4:30 PM",
+            18: "4:30 PM - 5:00 PM",
+            19: "5:00 PM - 5:30 PM",
+            20: "5:30 PM - 6:00 PM",
+            21: "6:00 PM - 6:30 PM",
+            22: "6:30 PM - 7:00 PM",
+            23: "7:00 PM - 7:30 PM",
+            24: "7:30 PM - 8:00 PM",
+            25: "8:00 PM - 8:30 PM",
+            26: "8:30 PM - 9:00 PM",
+            27: "9:00 PM - 9:30 PM",
+            28: "9:30 PM - 10:00 PM",
+        }
         try:
             slot_num = int(slot_id)
-            if slot_num < 1 or slot_num > 28:
-                return f"Slot {slot_id}"
-            total_minutes = 8 * 60 + (slot_num - 1) * 30
-            return self._format_minutes_12h(total_minutes)
+            return slot_map.get(slot_num, f"Slot {slot_id}")
         except (ValueError, TypeError):
             return f"Slot {slot_id}"
 
     def _format_slot_end_time(self, slot_id):
         """
-        End time is 30 minutes after slot start. Slot 28 ends at 10:00 PM.
+        Extract end time from slot mapping.
         """
-        try:
-            slot_num = int(slot_id)
-            if slot_num < 1 or slot_num > 28:
-                return f"Slot {slot_id}"
-            total_minutes = 8 * 60 + slot_num * 30  # end boundary
-            return self._format_minutes_12h(total_minutes)
-        except (ValueError, TypeError):
-            return f"Slot {slot_id}"
+        time_range = self._format_slot_time(slot_id)
+        if " - " in time_range:
+            return time_range.split(" - ")[1]
+        return time_range
 
     def _format_slot_range_text(self, slot_ids):
         """
