@@ -12,10 +12,14 @@ urlpatterns = [
     path("teams/<int:id>/request-to-join/", views.request_to_join_team, name="team-request-to-join"),
     path("teams/<int:id>/remove-member/", views.remove_member, name="team-remove-member"),
     path("teams/<int:id>/leave/", views.leave_team, name="team-leave"),
+    path("teams/<int:team_id>/bulk-update-members/", views.bulk_update_members, name="team-bulk-update-members"),
+    path("teams/<int:team_id>/transfer-captain/", views.transfer_captain, name="team-transfer-captain"),
 
     # Invitations
-    path("invitations/match-invite/", views.invite_team_for_match, name="match-invite"),
-    path("invitations/team-invite/<int:id>/respond/", views.respond_to_team_invitation, name="respond-to-team-invite"),
-    path("invitations/team-request/<int:id>/respond/", views.respond_to_join_request, name="respond-to-team-request"),
-    path("invitations/match-invite/<int:id>/respond/", views.respond_to_match_invitation, name="respond-to-match-invite"),
+    path("teams/invitations/match-invite/", views.invite_team_for_match, name="match-invite"),
+    path("teams/invitations/sent/", views.list_sent_invitations, name="list-sent-invitations"),
+    path("teams/invitations/received/", views.list_received_invitations, name="list-received-invitations"),
+    path("teams/invitations/team-invite/<int:id>/respond/", views.respond_to_team_invitation, name="respond-to-team-invite"),
+    path("teams/invitations/team-request/<int:id>/respond/", views.respond_to_join_request, name="respond-to-team-request"),
+    path("teams/invitations/match-invite/<int:id>/respond/", views.respond_to_match_invitation, name="respond-to-match-invite"),
 ]
