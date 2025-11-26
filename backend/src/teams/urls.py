@@ -12,7 +12,7 @@ urlpatterns = [
     path("teams/<int:id>/request-to-join/", views.request_to_join_team, name="team-request-to-join"),
     path("teams/<int:id>/remove-member/", views.remove_member, name="team-remove-member"),
     path("teams/<int:id>/leave/", views.leave_team, name="team-leave"),
-    path("teams/<int:team_id>/bulk-update-members/", views.bulk_update_members, name="team-bulk-update-members"),
+    path("teams/<int:team_id>/bulk-update/", views.bulk_update_team, name="team-bulk-update"),
     path("teams/<int:team_id>/transfer-captain/", views.transfer_captain, name="team-transfer-captain"),
 
     # Invitations

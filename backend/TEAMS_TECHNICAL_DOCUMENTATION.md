@@ -280,7 +280,7 @@ class Invitation(models.Model):
 | POST | `/teams/` | ✅ Implemented | Create a new team (JWT required) |
 | GET | `/teams/{id}/` | ✅ Implemented | Get team details with members |
 | GET | `/teams/by-sport/?sport_id={id}` | ✅ Implemented | List teams for a specific sport |
-| POST | `/teams/{team_id}/bulk-update-members/` | ✅ Implemented | Replace all members (captain/admin only) |
+| POST | `/teams/{team_id}/bulk-update/` | ✅ Implemented | Replace all members and update achievements (captain/admin only) |
 | POST | `/teams/{team_id}/transfer-captain/` | ✅ Implemented | Transfer captaincy (captain/admin only) |
 | POST | `/teams/{id}/leave/` | ✅ Implemented | Leave a team (members only) |
 | POST | `/teams/{id}/invite-member/` | 🚧 Placeholder | Invite player to team |
@@ -574,7 +574,7 @@ GET /api/teams/by-sport/?sport_id=1 HTTP/1.1
 
 ### 5. Bulk Update Team Members
 
-**Endpoint:** `POST /api/teams/{team_id}/bulk-update-members/`  
+**Endpoint:** `POST /api/teams/{team_id}/bulk-update/`  
 **Authentication:** JWT required  
 **Authorization:** Team captain or admin users only  
 **Description:** Replace all team members (except captain) with a new list of members
@@ -848,7 +848,7 @@ The Teams module implements a role-based permission system with three levels:
 
 **2. Admin Permissions (is_admin=True)**
 - All captain permissions on ANY team
-- Can bulk update members on any team
+- Can bulk update members and achievements on any team
 - Can transfer captaincy on any team
 - Override captain-only restrictions
 

@@ -124,7 +124,7 @@ Comprehensive test suite (30+ tests):
 ### 1. `/src/teams/views.py`
 **Added:**
 - Import statements for permissions and notifications
-- `bulk_update_members()` - Full implementation (150+ lines)
+- `bulk_update_team()` - Full implementation (150+ lines) - Updates members and achievements
 - `leave_team()` - Full implementation (70+ lines)
 - `transfer_captain()` - Full implementation (120+ lines)
 
@@ -141,7 +141,7 @@ Comprehensive test suite (30+ tests):
 
 ### 3. `/src/teams/urls.py`
 **Added:**
-- `/teams/<int:team_id>/bulk-update-members/` → `bulk_update_members`
+- `/teams/<int:team_id>/bulk-update/` → `bulk_update_team`
 - `/teams/<int:team_id>/transfer-captain/` → `transfer_captain`
 
 **Note:** Leave team endpoint already existed, just changed from placeholder to full implementation

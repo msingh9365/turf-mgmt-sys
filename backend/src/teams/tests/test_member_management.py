@@ -2,7 +2,7 @@
 Comprehensive test suite for Team Member Management features.
 
 Tests cover:
-- Feature 1: Bulk Update Members
+- Feature 1: Bulk Update Team (Members + Achievements)
 - Feature 2: Leave Team
 - Feature 3: Transfer Captain
 - Feature 4: Enhanced Create Team
@@ -106,12 +106,12 @@ def create_team(db, create_users, create_sport):
 
 
 # ============================================================================
-# Feature 1: Bulk Update Members Tests
+# Feature 1: Bulk Update Team (Members + Achievements) Tests
 # ============================================================================
 
 @pytest.mark.django_db
 def test_bulk_update_by_captain_success(api_client, create_team, create_users):
-    """Test captain can successfully bulk update members."""
+    """Test captain can successfully bulk update members and achievements."""
     team = create_team
     users = create_users
     captain = users[0]
@@ -122,10 +122,14 @@ def test_bulk_update_by_captain_success(api_client, create_team, create_users):
     # New member emails (different from current members)
     # Need at least 10 members + captain (11 total) to meet minimum requirement
     new_emails = [f"user{i}@example.com" for i in range(11, 21)]
+    new_achievements = [
+        {"title": "Championship Winners", "description": "Won 2024 season", "date": "2024-11-01"},
+        {"title": "Best Team Spirit", "description": "Voted by league", "date": "2024-10-15"}
+    ]
     
     response = api_client.post(
-        f"/api/teams/{team.team_id}/bulk-update-members/",
-        {"member_emails": new_emails},
+        f"/api/teams/{team.team_id}/bulk-update/",
+        {"member_emails": new_emails, "achievements": new_achievements},
         format="json"
     )
     
@@ -134,15 +138,19 @@ def test_bulk_update_by_captain_success(api_client, create_team, create_users):
     assert data["team_id"] == team.team_id
     assert data["members_added"] == 10
     assert data["members_removed"] == 11  # Team had 11 players (not 10)
+    assert data["achievements_updated"] is True
+    assert "achievements updated" in data["message"].lower()
     
-    # Verify member count updated
+    # Verify member count and achievements updated
     team.refresh_from_db()
     assert team.member_count == 11  # 1 captain + 10 new members
+    assert len(team.achievements) == 2
+    assert team.achievements[0]["title"] == "Championship Winners"
 
 
 @pytest.mark.django_db
 def test_bulk_update_by_admin_success(api_client, create_team, create_users):
-    """Test admin can bulk update members on any team."""
+    """Test admin can bulk update members and achievements on any team."""
     team = create_team
     users = create_users
     admin = users[-1]  # Last user is admin
@@ -151,21 +159,22 @@ def test_bulk_update_by_admin_success(api_client, create_team, create_users):
     api_client.force_authenticate(user=admin)
     
     new_emails = [f"user{i}@example.com" for i in range(11, 21)]
+    new_achievements = [{"title": "Admin Updated Achievement"}]
     
     response = api_client.post(
-        f"/api/teams/{team.team_id}/bulk-update-members/",
-        {"member_emails": new_emails},
+        f"/api/teams/{team.team_id}/bulk-update/",
+        {"member_emails": new_emails, "achievements": new_achievements},
         format="json"
     )
     
     assert response.status_code == 200
     data = response.json()
-    assert data["message"] == "Team roster updated successfully"
+    assert "achievements updated" in data["message"].lower()
 
 
 @pytest.mark.django_db
 def test_bulk_update_by_non_authorized_user_fails(api_client, create_team, create_users):
-    """Test non-captain/non-admin cannot bulk update members."""
+    """Test non-captain/non-admin cannot bulk update team."""
     team = create_team
     users = create_users
     regular_user = users[1]  # Not captain, not admin
@@ -173,10 +182,11 @@ def test_bulk_update_by_non_authorized_user_fails(api_client, create_team, creat
     api_client.force_authenticate(user=regular_user)
     
     new_emails = [f"user{i}@example.com" for i in range(11, 21)]
+    new_achievements = []
     
     response = api_client.post(
-        f"/api/teams/{team.team_id}/bulk-update-members/",
-        {"member_emails": new_emails},
+        f"/api/teams/{team.team_id}/bulk-update/",
+        {"member_emails": new_emails, "achievements": new_achievements},
         format="json"
     )
     
@@ -194,10 +204,11 @@ def test_bulk_update_maintains_captain(api_client, create_team, create_users):
     
     # Include captain's email in the list (should be ignored)
     new_emails = [captain.email] + [f"user{i}@example.com" for i in range(11, 21)]
+    new_achievements = [{"title": "Captain Test"}]
     
     response = api_client.post(
-        f"/api/teams/{team.team_id}/bulk-update-members/",
-        {"member_emails": new_emails},
+        f"/api/teams/{team.team_id}/bulk-update/",
+        {"member_emails": new_emails, "achievements": new_achievements},
         format="json"
     )
     
@@ -222,10 +233,11 @@ def test_bulk_update_validates_min_players(api_client, create_team, create_users
     
     # Try to update with only 5 members (total 6 including captain, min is 11)
     new_emails = [f"user{i}@example.com" for i in range(1, 6)]
+    new_achievements = []
     
     response = api_client.post(
-        f"/api/teams/{team.team_id}/bulk-update-members/",
-        {"member_emails": new_emails},
+        f"/api/teams/{team.team_id}/bulk-update/",
+        {"member_emails": new_emails, "achievements": new_achievements},
         format="json"
     )
     
@@ -258,10 +270,11 @@ def test_bulk_update_deduplicates_emails(api_client, create_team, create_users):
         "user19@example.com",
         "user20@example.com"
     ]
+    new_achievements = [{"title": "Deduplication Test"}]
     
     response = api_client.post(
-        f"/api/teams/{team.team_id}/bulk-update-members/",
-        {"member_emails": new_emails},
+        f"/api/teams/{team.team_id}/bulk-update/",
+        {"member_emails": new_emails, "achievements": new_achievements},
         format="json"
     )
     
@@ -293,10 +306,11 @@ def test_bulk_update_handles_nonexistent_users(api_client, create_team, create_u
         "nonexistent1@example.com",  # Does not exist
         "nonexistent2@example.com",  # Does not exist
     ]
+    new_achievements = [{"title": "Nonexistent Test"}]
     
     response = api_client.post(
-        f"/api/teams/{team.team_id}/bulk-update-members/",
-        {"member_emails": new_emails},
+        f"/api/teams/{team.team_id}/bulk-update/",
+        {"member_emails": new_emails, "achievements": new_achievements},
         format="json"
     )
     
@@ -321,10 +335,11 @@ def test_bulk_update_is_atomic(api_client, create_team, create_users):
     
     # This should succeed
     valid_emails = [f"user{i}@example.com" for i in range(11, 21)]
+    new_achievements = [{"title": "Atomic Test"}]
     
     response = api_client.post(
-        f"/api/teams/{team.team_id}/bulk-update-members/",
-        {"member_emails": valid_emails},
+        f"/api/teams/{team.team_id}/bulk-update/",
+        {"member_emails": valid_emails, "achievements": new_achievements},
         format="json"
     )
     
@@ -348,10 +363,11 @@ def test_bulk_update_updates_member_count(api_client, create_team, create_users)
     
     initial_count = team.member_count  # Should be 12 (1 captain + 11 players)
     new_emails = [f"user{i}@example.com" for i in range(12, 22)]  # 10 new members
+    new_achievements = [{"title": "Member Count Test"}]
     
     response = api_client.post(
-        f"/api/teams/{team.team_id}/bulk-update-members/",
-        {"member_emails": new_emails},
+        f"/api/teams/{team.team_id}/bulk-update/",
+        {"member_emails": new_emails, "achievements": new_achievements},
         format="json"
     )
     
@@ -359,6 +375,180 @@ def test_bulk_update_updates_member_count(api_client, create_team, create_users)
     
     team.refresh_from_db()
     assert team.member_count == 11  # 1 captain + 10 new members (replaced 11 with 10)
+
+
+# ============================================================================
+# Achievements Validation Tests
+# ============================================================================
+
+@pytest.mark.django_db
+def test_bulk_update_with_empty_achievements(api_client, create_team, create_users):
+    """Test bulk update can clear achievements with empty list."""
+    team = create_team
+    captain = create_users[0]
+    
+    # Set initial achievements
+    team.achievements = [{"title": "Old Achievement"}]
+    team.save()
+    
+    api_client.force_authenticate(user=captain)
+    
+    new_emails = [f"user{i}@example.com" for i in range(11, 21)]
+    
+    response = api_client.post(
+        f"/api/teams/{team.team_id}/bulk-update/",
+        {"member_emails": new_emails, "achievements": []},
+        format="json"
+    )
+    
+    assert response.status_code == 200
+    team.refresh_from_db()
+    assert team.achievements == []
+
+
+@pytest.mark.django_db
+def test_bulk_update_achievements_max_limit(api_client, create_team, create_users):
+    """Test that achievements cannot exceed 10 items."""
+    team = create_team
+    captain = create_users[0]
+    
+    api_client.force_authenticate(user=captain)
+    
+    new_emails = [f"user{i}@example.com" for i in range(11, 21)]
+    # Try to add 11 achievements (over limit)
+    too_many_achievements = [{"title": f"Achievement {i}"} for i in range(11)]
+    
+    response = api_client.post(
+        f"/api/teams/{team.team_id}/bulk-update/",
+        {"member_emails": new_emails, "achievements": too_many_achievements},
+        format="json"
+    )
+    
+    assert response.status_code == 400
+    assert "maximum 10" in response.json()["message"].lower()
+
+
+@pytest.mark.django_db
+def test_bulk_update_achievements_must_be_list(api_client, create_team, create_users):
+    """Test that achievements must be a list."""
+    team = create_team
+    captain = create_users[0]
+    
+    api_client.force_authenticate(user=captain)
+    
+    new_emails = [f"user{i}@example.com" for i in range(11, 21)]
+    
+    response = api_client.post(
+        f"/api/teams/{team.team_id}/bulk-update/",
+        {"member_emails": new_emails, "achievements": "not a list"},
+        format="json"
+    )
+    
+    assert response.status_code == 400
+    assert "must be a list" in response.json()["message"].lower()
+
+
+@pytest.mark.django_db
+def test_bulk_update_achievement_must_have_title(api_client, create_team, create_users):
+    """Test that each achievement must have a title field."""
+    team = create_team
+    captain = create_users[0]
+    
+    api_client.force_authenticate(user=captain)
+    
+    new_emails = [f"user{i}@example.com" for i in range(11, 21)]
+    invalid_achievements = [{"description": "No title field"}]
+    
+    response = api_client.post(
+        f"/api/teams/{team.team_id}/bulk-update/",
+        {"member_emails": new_emails, "achievements": invalid_achievements},
+        format="json"
+    )
+    
+    assert response.status_code == 400
+    assert "title" in response.json()["message"].lower()
+
+
+@pytest.mark.django_db
+def test_bulk_update_achievement_must_be_object(api_client, create_team, create_users):
+    """Test that each achievement must be an object/dict."""
+    team = create_team
+    captain = create_users[0]
+    
+    api_client.force_authenticate(user=captain)
+    
+    new_emails = [f"user{i}@example.com" for i in range(11, 21)]
+    invalid_achievements = ["string achievement", "another string"]
+    
+    response = api_client.post(
+        f"/api/teams/{team.team_id}/bulk-update/",
+        {"member_emails": new_emails, "achievements": invalid_achievements},
+        format="json"
+    )
+    
+    assert response.status_code == 400
+    assert "must be an object" in response.json()["message"].lower()
+
+
+@pytest.mark.django_db
+def test_bulk_update_achievements_required(api_client, create_team, create_users):
+    """Test that achievements field is required."""
+    team = create_team
+    captain = create_users[0]
+    
+    api_client.force_authenticate(user=captain)
+    
+    new_emails = [f"user{i}@example.com" for i in range(11, 21)]
+    
+    # Missing achievements field
+    response = api_client.post(
+        f"/api/teams/{team.team_id}/bulk-update/",
+        {"member_emails": new_emails},
+        format="json"
+    )
+    
+    assert response.status_code == 400
+    assert "achievements" in response.json()["message"].lower()
+
+
+@pytest.mark.django_db
+def test_bulk_update_with_complex_achievements(api_client, create_team, create_users):
+    """Test bulk update with complex achievement objects."""
+    team = create_team
+    captain = create_users[0]
+    
+    api_client.force_authenticate(user=captain)
+    
+    new_emails = [f"user{i}@example.com" for i in range(11, 21)]
+    complex_achievements = [
+        {
+            "title": "Regional Champions 2024",
+            "description": "Won the regional tournament with a 10-0 record",
+            "date": "2024-11-05"
+        },
+        {
+            "title": "Best Team Spirit",
+            "description": "Voted by all league members",
+            "date": "2024-10-20"
+        },
+        {
+            "title": "Undefeated Season",
+            "description": "Complete season without a single loss"
+        }
+    ]
+    
+    response = api_client.post(
+        f"/api/teams/{team.team_id}/bulk-update/",
+        {"member_emails": new_emails, "achievements": complex_achievements},
+        format="json"
+    )
+    
+    assert response.status_code == 200
+    team.refresh_from_db()
+    assert len(team.achievements) == 3
+    assert team.achievements[0]["title"] == "Regional Champions 2024"
+    assert team.achievements[1]["date"] == "2024-10-20"
+    assert "description" in team.achievements[2]
 
 
 # ============================================================================
@@ -747,8 +937,8 @@ def test_full_workflow_create_update_leave_transfer(api_client, create_users, cr
     
     # 2. Bulk update members to 11 (+ captain = 12 total, allows one to leave)
     response = api_client.post(
-        f"/api/teams/{team_id}/bulk-update-members/",
-        {"member_emails": [f"user{i}@example.com" for i in range(12, 23)]},
+        f"/api/teams/{team_id}/bulk-update/",
+        {"member_emails": [f"user{i}@example.com" for i in range(12, 23)], "achievements": []},
         format="json"
     )
     assert response.status_code == 200
@@ -788,13 +978,14 @@ def test_bulk_update_query_count(api_client, create_team, create_users, django_a
     api_client.force_authenticate(user=captain)
     
     new_emails = [f"user{i}@example.com" for i in range(11, 21)]
+    new_achievements = [{"title": "Performance Test"}]
     
     # Should be efficient with minimal queries
-    # With 10 members: 1 team query + 10 user lookups + transaction queries + 11 device lookups for notifications
-    with django_assert_num_queries(29):  # Actual count verified
+    # With 10 members: 1 team query + 10 user lookups + transaction queries (no notification lookups in test)
+    with django_assert_num_queries(17):  # Updated count after achievements field added
         response = api_client.post(
-            f"/api/teams/{team.team_id}/bulk-update-members/",
-            {"member_emails": new_emails},
+            f"/api/teams/{team.team_id}/bulk-update/",
+            {"member_emails": new_emails, "achievements": new_achievements},
             format="json"
         )
     
@@ -842,11 +1033,12 @@ def test_bulk_update_performance_with_many_members(api_client, create_users, cre
     api_client.force_authenticate(user=captain)
     
     new_emails = [f"user{i}@example.com" for i in range(1, 11)]
+    new_achievements = [{"title": "Large Team Test"}]
     
     start_time = time.time()
     response = api_client.post(
-        f"/api/teams/{team.team_id}/bulk-update-members/",
-        {"member_emails": new_emails},
+        f"/api/teams/{team.team_id}/bulk-update/",
+        {"member_emails": new_emails, "achievements": new_achievements},
         format="json"
     )
     end_time = time.time()
