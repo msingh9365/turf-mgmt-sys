@@ -14,6 +14,6 @@ urlpatterns = [
     path("api/bookings/", include("bookings.urls")),    # /api/bookings/
     path("api/teams/", include("teams.urls")),          # /api/teams/
     path("api/notifications/", include("notifications.urls")),  # /api/notifications/
-    path("api/", include("profile_app.urls")),          # /api/profile/, /api/profile/achievements/
+    path("api/profile/", include("profile_app.urls")),  # /api/profile/me/ (combined profile + achievements)
 
 ]

@@ -15,6 +15,7 @@ from .serializers import (
     ProfileSerializer,
     ProfileEditSerializer,
     ProfileUpdateSerializer,
+    CombinedProfileUpdateSerializer,
     AchievementSerializer,
 )
 
@@ -38,8 +39,8 @@ def get_user_teams(user: User) -> QuerySet[Team]:
 
 class ProfileView(APIView):
     """
-    GET  -> Fetch the logged-in user's full profile (user info, team, achievements)
-    PUT  -> Update profile details (name, phone, interested_sports, avatar_id)
+    GET  -> Fetch the logged-in user's full profile (user info, teams, achievements)
+    PUT  -> Update profile details AND achievements in ONE request
     """
     permission_classes = [permissions.IsAuthenticated]
 
@@ -73,20 +74,20 @@ class ProfileView(APIView):
         # Ensure a profile exists
         profile, _ = Profile.objects.get_or_create(user=request.user)
 
-        # Validate and update profile/user details (all fields required)
-        serializer = ProfileUpdateSerializer(
+        # Validate and update profile + achievements together
+        serializer = CombinedProfileUpdateSerializer(
             instance=profile, data=request.data
         )
         serializer.is_valid(raise_exception=True)
         serializer.save()
 
-        # Return updated profile view
+        # Return updated profile view (with achievements included)
         teams_qs = get_user_teams(request.user).order_by("-created_at")
         read = ProfileSerializer(profile, context={"teams_queryset": teams_qs})
 
         return Response(
             {
-                "message": "Profile updated successfully.",
+                "message": "Profile and achievements updated successfully.",
                 "profile": read.data,
             },
             status=status.HTTP_200_OK,
