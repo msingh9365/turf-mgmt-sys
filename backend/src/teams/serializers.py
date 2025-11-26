@@ -69,13 +69,17 @@ class TeamCreateSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class BulkUpdateMembersSerializer(serializers.Serializer):
-    """Serializer for bulk updating team members."""
+class BulkUpdateTeamSerializer(serializers.Serializer):
+    """Serializer for bulk updating team members and achievements."""
     member_emails = serializers.ListField(
         child=serializers.EmailField(),
         required=True,
         allow_empty=False,
         help_text="List of member email addresses to replace existing members (except captain)"
+    )
+    achievements = serializers.JSONField(
+        required=True,
+        help_text="Team achievements (max 10). Each achievement should have: title, description, date"
     )
 
     def validate_member_emails(self, value):
@@ -90,6 +94,20 @@ class BulkUpdateMembersSerializer(serializers.Serializer):
             raise serializers.ValidationError("No valid email addresses provided")
         
         return unique_emails
+    
+    def validate_achievements(self, value):
+        """Validate achievements field - max 10 achievements allowed"""
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Achievements must be a list")
+        if len(value) > 10:
+            raise serializers.ValidationError("Maximum 10 achievements allowed")
+        # Validate each achievement has required fields
+        for achievement in value:
+            if not isinstance(achievement, dict):
+                raise serializers.ValidationError("Each achievement must be an object")
+            if 'title' not in achievement:
+                raise serializers.ValidationError("Each achievement must have a 'title' field")
+        return value
 
 
 class TransferCaptainSerializer(serializers.Serializer):

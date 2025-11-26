@@ -10,7 +10,7 @@ from bookings.models import Sport
 from teams.permissions import is_team_captain, is_admin_user, is_team_member, can_modify_team
 from teams.notifications import send_team_notification
 from teams.serializers import (
-    BulkUpdateMembersSerializer, 
+    BulkUpdateTeamSerializer, 
     TransferCaptainSerializer,
     MatchInviteSerializer,
     InvitationDetailSerializer
@@ -128,9 +128,10 @@ def list_or_create_team(request):
                 "achievements": team.achievements,
             }
             
-            # Add warning if some members weren't added
+            # Add warning if some members weren't added with email details
             if failed_emails:
-                team_data["warning"] = f"Team created but {len(failed_emails)} member(s) not found: {', '.join(failed_emails)}"
+                team_data["warning"] = f"Team created but {len(failed_emails)} member(s) not found and were not added."
+                team_data["rejected_members"] = failed_emails
 
             return Response(team_data, status=status.HTTP_201_CREATED)
 
@@ -226,9 +227,9 @@ def remove_member(request, id):
 
 @api_view(["POST"])
 @permission_classes([permissions.IsAuthenticated])
-def bulk_update_members(request, team_id):
+def bulk_update_team(request, team_id):
     """
-    Replace all team members (except captain) with a new list.
+    Replace all team members (except captain) with a new list and update achievements.
     
     Requires captain or admin authorization. Validates minimum player
     count before performing any deletions. Operation is atomic.
@@ -239,6 +240,7 @@ def bulk_update_members(request, team_id):
         
     Request Body:
         member_emails: List of email addresses
+        achievements: List of achievement objects (max 10)
         
     Returns:
         200: Success with updated team details
@@ -250,7 +252,7 @@ def bulk_update_members(request, team_id):
         IntegrityError: If database constraints violated (should not happen)
     """
     # Validate request data
-    serializer = BulkUpdateMembersSerializer(data=request.data)
+    serializer = BulkUpdateTeamSerializer(data=request.data)
     if not serializer.is_valid():
         return Response(
             {"message": f"Invalid request data: {serializer.errors}"},
@@ -258,6 +260,7 @@ def bulk_update_members(request, team_id):
         )
     
     member_emails = serializer.validated_data['member_emails']
+    achievements = serializer.validated_data['achievements']
     
     try:
         # Fetch team with related data
@@ -334,9 +337,10 @@ def bulk_update_members(request, team_id):
         # Bulk create new members
         TeamMember.objects.bulk_create(new_members, ignore_conflicts=True)
         
-        # Update member count
+        # Update member count and achievements
         team.member_count = 1 + len(new_members)  # 1 for captain + new members
-        team.save(update_fields=['member_count'])
+        team.achievements = achievements
+        team.save(update_fields=['member_count', 'achievements'])
         
         members_added = len(new_members)
     
@@ -346,7 +350,7 @@ def bulk_update_members(request, team_id):
         all_affected_ids = existing_member_ids.union(new_member_ids)
         
         # Create detailed message
-        message = f"Team roster updated: {members_added} member(s) added, {members_removed} member(s) removed"
+        message = f"Team roster and achievements updated: {members_added} member(s) added, {members_removed} member(s) removed"
         send_team_notification(
             team=team,
             notification_type='ROSTER_UPDATED',
@@ -364,7 +368,8 @@ def bulk_update_members(request, team_id):
         "member_count": team.member_count,
         "members_added": members_added,
         "members_removed": members_removed,
-        "message": "Team roster updated successfully"
+        "achievements_updated": True,
+        "message": "Team roster and achievements updated successfully"
     }
     
     if failed_emails:

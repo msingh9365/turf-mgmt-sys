@@ -68,6 +68,56 @@ Content-Type: application/json
 }
 ```
 
+### Bulk Update Team Members and Achievements
+Update both team roster and achievements in a single atomic operation:
+
+```bash
+POST /api/teams/{team_id}/bulk-update/
+Content-Type: application/json
+Authorization: Bearer <token>
+
+{
+  "member_emails": [
+    "player1@example.com",
+    "player2@example.com",
+    "player3@example.com"
+  ],
+  "achievements": [
+    {
+      "title": "Regional Champions",
+      "description": "Won the 2024 regional tournament",
+      "date": "2024-11-05"
+    },
+    {
+      "title": "Best Team Spirit",
+      "description": "Voted by league members",
+      "date": "2024-10-20"
+    }
+  ]
+}
+```
+
+**Response:**
+```json
+{
+  "team_id": 1,
+  "team_name": "Thunder Hawks",
+  "member_count": 4,
+  "members_added": 3,
+  "members_removed": 2,
+  "achievements_updated": true,
+  "message": "Team roster and achievements updated successfully"
+}
+```
+
+**Notes:**
+- Requires authentication (captain or admin only)
+- Replaces ALL existing members (except captain) with the new list
+- Replaces ALL existing achievements with the new list
+- Maximum 10 achievements allowed
+- Each achievement must have a `title` field
+- Operation is atomic - if any part fails, nothing is updated
+
 ### Getting Team with Achievements
 ```bash
 GET /api/teams/{team_id}/
