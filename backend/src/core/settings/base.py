@@ -33,6 +33,9 @@ env = environ.Env(
     SUPABASE_URL=(str, ""),
     SUPABASE_KEY=(str, ""),
     SUPABASE_JWT_SECRET=(str, ""),
+    # Brevo (Sendinblue) API settings
+    BREVO_API_KEY=(str, ""),
+    DEFAULT_FROM_EMAIL=(str, ""),
     REDIS_HOST=(str, "localhost"),
     REDIS_PORT=(int, 6379),
     REDIS_PASSWORD=(str, ""),
@@ -73,9 +76,13 @@ INSTALLED_APPS = [
 
     # Local apps
     "users",
+    'otp',
+
     "bookings",
+    "events",
     "teams",
     "notifications",  # Notification system for FCM
+    "profile_app",
 ]
 # FCM configuration
 # Add FCM_SERVER_KEY to your .env file:
@@ -83,6 +90,7 @@ INSTALLED_APPS = [
 FCM_SERVER_KEY = env("FCM_SERVER_KEY", default=None)
 
 MIDDLEWARE = [
+    "core.middleware.StripAuthForOtpMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -206,7 +214,10 @@ ALLOWED_EMAIL_DOMAIN = env("ALLOWED_EMAIL_DOMAIN")
 # Google OAuth client configuration for Android
 GOOGLE_CLIENT_ID_ANDROID = env("GOOGLE_CLIENT_ID_ANDROID")
 GOOGLE_CLIENT_ID_WEB = env("GOOGLE_CLIENT_ID_WEB")
-GOOGLE_CLIENT_SECRET_WEB = env("GOOGLE_CLIENT_SECRET_WEB")
+
+# Brevo (Sendinblue) API configuration
+BREVO_API_KEY = env("BREVO_API_KEY")
+DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL")
 
 # Redis configuration
 REDIS_HOST = env("REDIS_HOST")
@@ -240,3 +251,10 @@ else:
             "TIMEOUT": 300,
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# Events app configuration
+# ---------------------------------------------------------------------------
+# This tells the events app to use the Sport model from the bookings app.
+SPORT_MODEL = "bookings.Sport"
