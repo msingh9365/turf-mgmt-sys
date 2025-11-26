@@ -33,6 +33,14 @@ env = environ.Env(
     SUPABASE_URL=(str, ""),
     SUPABASE_KEY=(str, ""),
     SUPABASE_JWT_SECRET=(str, ""),
+    # Email settings
+    EMAIL_BACKEND=(str, "django.core.mail.backends.smtp.EmailBackend"),
+    EMAIL_HOST=(str, "smtp.gmail.com"),
+    EMAIL_PORT=(int, 587),
+    EMAIL_USE_TLS=(bool, True),
+    EMAIL_HOST_USER=(str, ""),
+    EMAIL_HOST_PASSWORD=(str, ""),
+    DEFAULT_FROM_EMAIL=(str, ""),
     REDIS_HOST=(str, "localhost"),
     REDIS_PORT=(int, 6379),
     REDIS_PASSWORD=(str, ""),
@@ -73,6 +81,8 @@ INSTALLED_APPS = [
 
     # Local apps
     "users",
+    'otp',
+
     "bookings",
     "teams",
     "notifications",  # Notification system for FCM
@@ -83,6 +93,7 @@ INSTALLED_APPS = [
 FCM_SERVER_KEY = env("FCM_SERVER_KEY", default=None)
 
 MIDDLEWARE = [
+    "core.middleware.StripAuthForOtpMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -206,7 +217,15 @@ ALLOWED_EMAIL_DOMAIN = env("ALLOWED_EMAIL_DOMAIN")
 # Google OAuth client configuration for Android
 GOOGLE_CLIENT_ID_ANDROID = env("GOOGLE_CLIENT_ID_ANDROID")
 GOOGLE_CLIENT_ID_WEB = env("GOOGLE_CLIENT_ID_WEB")
-GOOGLE_CLIENT_SECRET_WEB = env("GOOGLE_CLIENT_SECRET_WEB")
+
+# Email configuration
+EMAIL_BACKEND = env("EMAIL_BACKEND")
+EMAIL_HOST = env("EMAIL_HOST")
+EMAIL_PORT = env.int("EMAIL_PORT")
+EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS")
+EMAIL_HOST_USER = env("EMAIL_HOST_USER")
+EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD")
+DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL") or EMAIL_HOST_USER
 
 # Redis configuration
 REDIS_HOST = env("REDIS_HOST")
