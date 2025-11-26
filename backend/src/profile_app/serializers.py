@@ -16,22 +16,46 @@ class SportSerializer(serializers.ModelSerializer):
 class TeamBriefSerializer(serializers.ModelSerializer):
     """Lightweight serializer for team details on the profile page."""
 
-    sport = serializers.SerializerMethodField()
+    team_id = serializers.IntegerField(source="id", read_only=True)
+    team_name = serializers.CharField(read_only=True)
+    sport_name = serializers.SerializerMethodField()
     captain_name = serializers.SerializerMethodField()
+    is_captain = serializers.SerializerMethodField()
     created_on = serializers.DateTimeField(source="created_at", read_only=True)
 
     class Meta:
         model = Team
-        fields = ["team_name", "sport", "captain_name", "created_on"]
+        fields = ["team_id", "team_name", "sport_name", "captain_name", "is_captain", "created_on"]
 
-    def get_sport(self, obj: Team) -> str:
+    def get_sport_name(self, obj: Team) -> str:
+        """Get sport name from the Sport model"""
         try:
             return obj.sport.sport_name
         except Exception:
             return str(obj.sport)
+    
+    def get_is_captain(self, obj: Team) -> int:
+        """
+        Return 1 if current user is captain, 0 if just a member.
+        Gets current user from context.
+        """
+        request = self.context.get('request')
+        if request and hasattr(request, 'user'):
+            current_user = request.user
+            return 1 if obj.captain_id == current_user.id else 0
+        return 0
 
     def get_captain_name(self, obj: Team) -> str:
+        """
+        Return captain's name.
+        If current user is captain, returns 'You', otherwise captain's name.
+        """
         try:
+            request = self.context.get('request')
+            if request and hasattr(request, 'user'):
+                current_user = request.user
+                if obj.captain_id == current_user.id:
+                    return "You"
             return obj.captain.name or obj.captain.email
         except Exception:
             return ""
@@ -62,7 +86,13 @@ class ProfileSerializer(serializers.Serializer):
         # The 'teams' field needs context from the view, so we handle it here.
         data = super().to_representation(instance)
         teams_queryset = self.context.get("teams_queryset", [])
-        data["teams"] = TeamBriefSerializer(teams_queryset, many=True).data
+        # Pass request context to TeamBriefSerializer for is_captain check
+        request = self.context.get("request")
+        data["teams"] = TeamBriefSerializer(
+            teams_queryset, 
+            many=True, 
+            context={"request": request}
+        ).data
         return data
 
 
@@ -80,7 +110,13 @@ class ProfileEditSerializer(serializers.Serializer):
     def to_representation(self, instance: Profile):
         data = super().to_representation(instance)
         teams = self.context.get("teams_queryset", [])
-        data["teams"] = TeamBriefSerializer(teams, many=True).data
+        # Pass request context to TeamBriefSerializer for is_captain check
+        request = self.context.get("request")
+        data["teams"] = TeamBriefSerializer(
+            teams, 
+            many=True, 
+            context={"request": request}
+        ).data
         data["achievements"] = AchievementSerializer(
             instance.achievements.all(), many=True
         ).data

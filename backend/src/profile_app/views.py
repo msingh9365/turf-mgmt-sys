@@ -19,7 +19,6 @@ from .serializers import (
     AchievementSerializer,
 )
 
-
 def get_user_teams(user: User) -> QuerySet[Team]:
     """
     Return teams the user belongs to (member or captain), robust across schemas.
@@ -56,10 +55,22 @@ class ProfileView(APIView):
 
         # Use appropriate serializer based on mode
         if edit_mode:
-            serializer = ProfileEditSerializer(profile, context={"teams_queryset": teams_qs})
+            serializer = ProfileEditSerializer(
+                profile, 
+                context={
+                    "teams_queryset": teams_qs,
+                    "request": request
+                }
+            )
             message = "Profile fetched for editing."
         else:
-            serializer = ProfileSerializer(profile, context={"teams_queryset": teams_qs})
+            serializer = ProfileSerializer(
+                profile, 
+                context={
+                    "teams_queryset": teams_qs,
+                    "request": request
+                }
+            )
             message = "Profile fetched successfully."
             
         return Response(
@@ -83,7 +94,13 @@ class ProfileView(APIView):
 
         # Return updated profile view (with achievements included)
         teams_qs = get_user_teams(request.user).order_by("-created_at")
-        read = ProfileSerializer(profile, context={"teams_queryset": teams_qs})
+        read = ProfileSerializer(
+            profile, 
+            context={
+                "teams_queryset": teams_qs,
+                "request": request
+            }
+        )
 
         return Response(
             {
