@@ -17,4 +17,5 @@ urlpatterns = [
     path("api/", include("events.urls")),
     # OTP endpoints (available under /api/otp/...)
     path("api/otp/", include("otp.urls")),
+    path("api/", include("profile_app.urls")),
 ]

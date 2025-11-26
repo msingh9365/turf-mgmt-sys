@@ -87,6 +87,7 @@ INSTALLED_APPS = [
     "events",
     "teams",
     "notifications",  # Notification system for FCM
+    "profile_app",
 ]
 # FCM configuration
 # Add FCM_SERVER_KEY to your .env file:
