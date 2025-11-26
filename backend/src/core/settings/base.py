@@ -84,6 +84,7 @@ INSTALLED_APPS = [
     'otp',
 
     "bookings",
+    "events",
     "teams",
     "notifications",  # Notification system for FCM
 ]
@@ -259,3 +260,10 @@ else:
             "TIMEOUT": 300,
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# Events app configuration
+# ---------------------------------------------------------------------------
+# This tells the events app to use the Sport model from the bookings app.
+SPORT_MODEL = "bookings.Sport"
