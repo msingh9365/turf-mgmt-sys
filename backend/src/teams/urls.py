@@ -6,6 +6,7 @@ urlpatterns = [
     path("teams/", views.list_or_create_team, name="team-list-create"),
     path("teams/<int:id>/", views.retrieve_team_details, name="team-detail"),
     path("teams/by-sport/", views.list_teams_by_sport, name="teams-by-sport"),
+    path("teams/captain/", views.list_captain_teams, name="captain-teams"),
 
     # Team actions
     path("teams/<int:id>/invite-member/", views.invite_player_to_team, name="team-invite-member"),

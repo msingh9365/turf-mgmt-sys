@@ -774,7 +774,51 @@ def respond_to_match_invitation(request, id):
     return Response({"detail": "Respond to match invitation not implemented yet."}, status=status.HTTP_501_NOT_IMPLEMENTED)
 
 
-@api_view(["GET"])
+@api_view(["GET"]) 
+@permission_classes([permissions.IsAuthenticated])
+def list_captain_teams(request):
+    """
+    GET /api/teams/captain/?sport_id=<int>
+
+    Returns a lean list of teams where the requesting user is the captain,
+    filtered by sport_id.
+    
+    Query Parameters:
+    - sport_id (required): Integer ID of the sport
+    
+    Response items include only:
+    - team_id
+    - team_name
+
+    Returns empty array if no matching teams found.
+    """
+    sport_id = request.query_params.get("sport_id")
+    if sport_id is None:
+        return Response({"message": "sport_id is required as a query parameter"}, status=status.HTTP_400_BAD_REQUEST)
+    
+    try:
+        sport_id_int = int(sport_id)
+    except (TypeError, ValueError):
+        return Response({"message": "sport_id must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Validate sport exists
+    try:
+        Sport.objects.get(sport_id=sport_id_int)
+    except Sport.DoesNotExist:
+        return Response({"message": "Invalid sport_id. Sport does not exist."}, status=status.HTTP_400_BAD_REQUEST)
+    
+    qs = (
+        Team.objects
+        .filter(captain=request.user, sport_id=sport_id_int)
+        .only("team_id", "team_name")
+        .order_by("team_name")
+    )
+
+    data = list(qs.values("team_id", "team_name"))
+    return Response(data, status=status.HTTP_200_OK)
+
+
+@api_view(["GET"]) 
 def list_teams_by_sport(request):
     """
     GET /api/teams/by-sport/?sport_id=<int>
