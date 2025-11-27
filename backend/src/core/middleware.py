@@ -17,8 +17,8 @@ class StripAuthForOtpMiddleware:
         except Exception:
             path = ""
 
-        # Normalize OTP path prefix; update if your OTP URLs change
-        if path.startswith("/api/otp/"):
+        # Normalize OTP and reset-password path prefixes; update if your URLs change
+        if path.startswith("/api/otp/") or path.startswith("/api/auth/reset-password/"):
             # Django stores the incoming Authorization value in HTTP_AUTHORIZATION
             if "HTTP_AUTHORIZATION" in request.META:
                 request.META.pop("HTTP_AUTHORIZATION", None)

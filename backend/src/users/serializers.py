@@ -76,3 +76,16 @@ class TokenPairSerializer(serializers.Serializer):
     def for_user(user: User) -> dict[str, str]:
         refresh = RefreshToken.for_user(user)
         return {"access": str(refresh.access_token), "refresh": str(refresh)}
+
+
+class ResetPasswordSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    new_password = serializers.CharField(write_only=True, min_length=8)
+
+    def validate_email(self, value: str) -> str:
+        validate_college_email(value)
+        return value.lower()
+
+    def validate_new_password(self, value: str) -> str:
+        # Django's password validators will be called automatically
+        return value
