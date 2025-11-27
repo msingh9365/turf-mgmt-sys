@@ -100,5 +100,3 @@ class Invitation(models.Model):
     class Meta:
         db_table = 'invitations'
 
-    class Meta:
-        db_table = 'team_achievements'
