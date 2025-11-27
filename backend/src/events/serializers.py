@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from django.utils import timezone
 from .models import Event
+from teams.models import Team
 
 
 class EventCreateSerializer(serializers.ModelSerializer):
@@ -17,7 +18,18 @@ class EventCreateSerializer(serializers.ModelSerializer):
         read_only_fields = ["id"]
     
     def validate(self, data):
-        """Validate event dates"""
+        """Validate event dates and captain status"""
+        # Verify user is a team captain (only on create, not update)
+        request = self.context.get('request')
+        if request and request.user and request.user.is_authenticated:
+            # Only check captain status if creating (no instance means create)
+            if not self.instance:
+                is_captain = Team.objects.filter(captain=request.user).exists()
+                if not is_captain:
+                    raise serializers.ValidationError(
+                        "You must be a team captain to create events"
+                    )
+        
         starts_at = data.get("starts_at")
         ends_at = data.get("ends_at")
         
@@ -42,7 +54,7 @@ class EventCreateSerializer(serializers.ModelSerializer):
             validated_data["created_by"] = req.user
             # Auto-set organizer_name from user if not provided
             if not validated_data.get("organizer_name"):
-                validated_data["organizer_name"] = req.user.get_full_name() or req.user.email
+                validated_data["organizer_name"] = req.user.name or req.user.email
         return super().create(validated_data)
 
 
@@ -92,7 +104,7 @@ class EventDetailSerializer(serializers.ModelSerializer):
     def get_creator_name(self, obj):
         """Return creator's name if available"""
         if obj.created_by:
-            return obj.created_by.get_full_name() or obj.created_by.email
+            return obj.created_by.name or obj.created_by.email
         return None
 
 
