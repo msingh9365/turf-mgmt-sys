@@ -137,7 +137,7 @@ class FCMNotificationSender:
             logger.error(f"Batch send error: {e}")
             return [False] * len(device_tokens)
 
-    def broadcast(self, title, body, data=None, exclude_user=None):
+    def broadcast(self, title, body, data=None, exclude_user=None, sport_filter=None):
         """
         Broadcast notification to all active devices using batch API.
         Creates individual Notification records for each user.
@@ -148,23 +148,35 @@ class FCMNotificationSender:
             body: Notification body
             data: Optional data payload
             exclude_user: User object to exclude from broadcast (e.g., the sender)
+            sport_filter: Optional Sport ID to filter recipients by interested_sports.
+                         If None, broadcasts to all users (backward compatible).
         
         Returns:
             List of (token, success) tuples.
         """
-        devices = UserDevice.objects.filter(is_active=True).select_related('user')
+        import time
+        query_start = time.time()
+        
+        devices = UserDevice.objects.filter(is_active=True).select_related('user', 'user__profile')
         
         # Exclude devices belonging to the specified user
         if exclude_user:
             devices = devices.exclude(user=exclude_user)
         
+        # Filter by sport interest if sport_filter is provided
+        if sport_filter:
+            devices = devices.filter(user__profile__interested_sports__sport_id=sport_filter)
+            logger.info(f"[BROADCAST] Filtering by sport_id={sport_filter}")
+        
         if not devices.exists():
-            logger.warning("No active devices found for broadcast")
+            query_time = time.time() - query_start
+            logger.info(f"[BROADCAST] No active devices found (query_time={query_time:.3f}s, sport_filter={sport_filter}, excluded={exclude_user.id if exclude_user else 'none'})")
             return []
         
         # Build token->user mapping for notification record creation
         device_list = list(devices)
-        logger.info(f"[BROADCAST] Found {len(device_list)} active devices for broadcast (excluded: {exclude_user.email if exclude_user else 'none'})")
+        query_time = time.time() - query_start
+        logger.info(f"[BROADCAST] Found {len(device_list)} active devices (query_time={query_time:.3f}s, sport_filter={sport_filter}, excluded={exclude_user.email if exclude_user else 'none'})")
         
         # Log first few devices for debugging
         for d in device_list[:5]:

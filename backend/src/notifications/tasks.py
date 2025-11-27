@@ -77,8 +77,16 @@ def broadcast_notification_async(title: str, body: str, data: Optional[Dict[str,
                 except User.DoesNotExist:
                     logger.warning(f"Exclude user {exclude_user_id} not found")
             
-            sender.broadcast(title, body, data, exclude_user=exclude_user)
-            logger.info(f"Async broadcast notification sent (excluded: {exclude_user_id})")
+            # Extract sport_id from data payload for sport-based filtering
+            sport_filter = None
+            if data and 'sport_id' in data:
+                try:
+                    sport_filter = int(data['sport_id'])
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid sport_id in data: {data.get('sport_id')}, falling back to no filter")
+            
+            sender.broadcast(title, body, data, exclude_user=exclude_user, sport_filter=sport_filter)
+            logger.info(f"Async broadcast notification sent (excluded: {exclude_user_id}, sport_filter: {sport_filter})")
         except Exception as e:
             logger.error(f"Failed to broadcast async notification: {e}")
         finally:

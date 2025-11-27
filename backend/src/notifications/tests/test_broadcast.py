@@ -39,6 +39,11 @@ class TestBroadcastLookingForPlayers:
         self.football = Sport.objects.create(sport_name='Football', min_player=10)
         self.cricket = Sport.objects.create(sport_name='Cricket', min_player=11)
 
+        # Set sport interests for users (required for sport-based filtering)
+        self.user1.profile.interested_sports.add(self.football)
+        self.user2.profile.interested_sports.add(self.football)
+        self.user3.profile.interested_sports.add(self.football)
+
         # Devices
         UserDevice.objects.create(user=self.user1, device_token='token1', device_type='android', is_active=True)
         UserDevice.objects.create(user=self.user2, device_token='token2', device_type='android', is_active=True)
