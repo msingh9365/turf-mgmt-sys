@@ -103,8 +103,8 @@ class ResetPasswordView(generics.GenericAPIView):
                     f"Dear {user.name},\n\n"
                     f"Your password has been successfully reset for the IIT Ropar Sports Booking System.\n\n"
                     f"All devices have been logged out for security. Please log in again with your new password.\n\n"
-                    f"If you did not request this password reset, please contact support immediately.\n\n"
-                    f"Thank you for using the Proximity-Based Sports Networking & Turf Management System.\n"
+                    f"If you did not request this password reset, please contact support (2025csm1007@iitrpr.ac.in -- Devasari Teja) immediately.\n\n"
+                    f"Thank you for using the Campus Court.\n"
                     f"Team EndGame"
                 )
             )
