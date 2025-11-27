@@ -126,6 +126,10 @@ class TransferCaptainSerializer(serializers.Serializer):
 
 class MatchInviteSerializer(serializers.Serializer):
     """Serializer for creating match invitations."""
+    sender_team_id = serializers.IntegerField(
+        required=True,
+        help_text="ID of your team sending the invitation (you must be captain)"
+    )
     target_team_id = serializers.IntegerField(
         required=True,
         help_text="ID of the team to invite"
@@ -146,6 +150,16 @@ class MatchInviteSerializer(serializers.Serializer):
         allow_null=True,
         help_text="Optional preferred ground/venue ID"
     )
+
+    def validate_sender_team_id(self, value):
+        """Validate sender team exists."""
+        if value <= 0:
+            raise serializers.ValidationError("Invalid sender team ID")
+        try:
+            Team.objects.get(team_id=value)
+        except Team.DoesNotExist:
+            raise serializers.ValidationError("Sender team does not exist")
+        return value
 
     def validate_target_team_id(self, value):
         """Validate target team exists."""
@@ -169,9 +183,17 @@ class MatchInviteSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         """Cross-field validation."""
+        sender_team_id = attrs.get('sender_team_id')
+        target_team_id = attrs.get('target_team_id')
+        
+        # Prevent self-invitation
+        if sender_team_id == target_team_id:
+            raise serializers.ValidationError({
+                "target_team_id": "Cannot invite your own team"
+            })
+        
         # Additional validation will be done in the view for:
-        # - sender is captain
-        # - not inviting own team
+        # - sender is captain of sender_team
         # - same sport check
         return attrs
 

@@ -602,14 +602,16 @@ def invite_team_for_match(request):
     
     POST /api/teams/invitations/match-invite/
     Body: {
-        "target_team_id": 2,
+        "sender_team_id": 1,                     // required
+        "target_team_id": 2,                     // required
         "message": "Let's play this Saturday!",  // optional
-        "preferred_date": "2025-12-01",  // optional (YYYY-MM-DD)
-        "ground_id": 1  // optional
+        "preferred_date": "2025-12-01",          // optional (YYYY-MM-DD)
+        "ground_id": 1                           // optional
     }
     
     Rules:
     - Only team captains can send match invitations
+    - Must be captain of the sender_team
     - Cannot invite own team
     - Teams must play the same sport
     - All members of target team receive notification
@@ -622,17 +624,21 @@ def invite_team_for_match(request):
             status=status.HTTP_400_BAD_REQUEST
         )
     
+    sender_team_id = serializer.validated_data['sender_team_id']
     target_team_id = serializer.validated_data['target_team_id']
     message = serializer.validated_data.get('message', '')
     preferred_date = serializer.validated_data.get('preferred_date')
     ground_id = serializer.validated_data.get('ground_id')
     
-    # Get sender's team where they are captain
+    # Get sender's team and verify they are captain
     try:
-        sender_team = Team.objects.select_related('captain', 'sport').get(captain=request.user)
+        sender_team = Team.objects.select_related('captain', 'sport').get(
+            team_id=sender_team_id,
+            captain=request.user
+        )
     except Team.DoesNotExist:
         return Response(
-            {"message": "You must be a team captain to send match invitations."},
+            {"message": "You must be the captain of the sender team to send match invitations."},
             status=status.HTTP_403_FORBIDDEN
         )
     
@@ -643,13 +649,6 @@ def invite_team_for_match(request):
         return Response(
             {"message": "Target team not found."},
             status=status.HTTP_404_NOT_FOUND
-        )
-    
-    # Prevent self-invitation
-    if sender_team.team_id == target_team.team_id:
-        return Response(
-            {"message": "Cannot invite your own team."},
-            status=status.HTTP_400_BAD_REQUEST
         )
     
     # Check same sport
@@ -665,6 +664,8 @@ def invite_team_for_match(request):
         'sender_team_name': sender_team.team_name,
         'sender_captain_email': request.user.email,
         'sender_captain_name': getattr(request.user, 'name', request.user.email),
+        'target_team_id': target_team.team_id,
+        'target_team_name': target_team.team_name,
     }
     
     if message:
@@ -713,6 +714,8 @@ def invite_team_for_match(request):
                 'invitation_id': str(invitation.invitation_id),
                 'sender_team_id': str(sender_team.team_id),
                 'sender_team_name': sender_team.team_name,
+                'target_team_id': str(target_team.team_id),
+                'target_team_name': target_team.team_name,
                 'sender_captain_email': request.user.email,
                 'sender_captain_name': match_details['sender_captain_name'],
             }
@@ -734,7 +737,7 @@ def invite_team_for_match(request):
             )
             
             logger.info(
-                f"Match invitation created: {sender_team.team_name} -> {target_team.team_name}. "
+                f"Match invitation created: {sender_team.team_name} (ID: {sender_team.team_id}) -> {target_team.team_name} (ID: {target_team.team_id}). "
                 f"Notified {notified_count} members."
             )
             
@@ -742,7 +745,10 @@ def invite_team_for_match(request):
                 {
                     "message": "Match invitation sent successfully.",
                     "invitation_id": invitation.invitation_id,
-                    "target_team": target_team.team_name,
+                    "sender_team_id": sender_team.team_id,
+                    "sender_team_name": sender_team.team_name,
+                    "target_team_id": target_team.team_id,
+                    "target_team_name": target_team.team_name,
                     "members_notified": notified_count
                 },
                 status=status.HTTP_201_CREATED

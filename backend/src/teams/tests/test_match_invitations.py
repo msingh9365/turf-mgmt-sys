@@ -137,6 +137,7 @@ class TestMatchInvitation:
         api_client.force_authenticate(user=captain1)
         
         data = {
+            "sender_team_id": team1.team_id,
             "target_team_id": team2.team_id,
             "message": "Let's play a friendly match this Saturday!",
             "preferred_date": "2025-12-01",
@@ -147,7 +148,9 @@ class TestMatchInvitation:
         assert response.status_code == status.HTTP_201_CREATED
         assert response.data['message'] == "Match invitation sent successfully."
         assert 'invitation_id' in response.data
-        assert response.data['target_team'] == team2.team_name
+        assert response.data['sender_team_id'] == team1.team_id
+        assert response.data['target_team_id'] == team2.team_id
+        assert response.data['target_team_name'] == team2.team_name
         
         # Verify invitation was created in database
         invitation = Invitation.objects.get(invitation_id=response.data['invitation_id'])
@@ -158,11 +161,12 @@ class TestMatchInvitation:
         assert invitation.match_details['sender_captain_email'] == captain1.email
         assert invitation.match_details['message'] == data['message']
     
-    def test_invite_team_non_captain_fails(self, api_client, member1, team2):
+    def test_invite_team_non_captain_fails(self, api_client, member1, team1, team2):
         """Test that non-captains cannot send match invitations."""
         api_client.force_authenticate(user=member1)
         
         data = {
+            "sender_team_id": team1.team_id,
             "target_team_id": team2.team_id,
         }
         
@@ -176,13 +180,15 @@ class TestMatchInvitation:
         api_client.force_authenticate(user=captain1)
         
         data = {
+            "sender_team_id": team1.team_id,
             "target_team_id": team1.team_id,
         }
         
         response = api_client.post("/api/teams/invitations/match-invite/", data, format='json')
         
         assert response.status_code == status.HTTP_400_BAD_REQUEST
-        assert "own team" in response.data['message'].lower()
+        # Error now comes from serializer validation
+        assert "own team" in str(response.data).lower() or "own team" in response.data.get('errors', {}).get('target_team_id', [''])[0].lower()
     
     def test_invite_different_sport_fails(self, api_client, captain1, team1, captain2):
         """Test that invitations fail when teams play different sports."""
@@ -198,6 +204,7 @@ class TestMatchInvitation:
         api_client.force_authenticate(user=captain1)
         
         data = {
+            "sender_team_id": team1.team_id,
             "target_team_id": basketball_team.team_id,
         }
         
@@ -211,6 +218,7 @@ class TestMatchInvitation:
         api_client.force_authenticate(user=captain1)
         
         data = {
+            "sender_team_id": team1.team_id,
             "target_team_id": team2.team_id,
             "ground_id": ground.ground_id,
             "preferred_date": "2025-12-15",
@@ -240,6 +248,8 @@ class TestMatchInvitation:
                 'sender_team_id': team1.team_id,
                 'sender_team_name': team1.team_name,
                 'sender_captain_email': captain1.email,
+                'target_team_id': team2.team_id,
+                'target_team_name': team2.team_name,
             }
         )
         
