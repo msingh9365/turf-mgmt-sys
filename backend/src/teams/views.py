@@ -186,14 +186,19 @@ def retrieve_team_details(request, id):
             u = membership.user
             members_data.append({
                 "user_id": getattr(u, 'id', None),
-                "name": getattr(u, 'name', getattr(u, 'email', '')), 
+                "name": getattr(u, 'name', getattr(u, 'email', '')),
+                "email": getattr(u, 'email', ''),
                 "role": membership.role,
             })
 
         team_data = {
             "team_id": team.team_id,
             "team_name": team.team_name,
-            "captain": {"user_id": getattr(team.captain, 'id', None), "name": getattr(team.captain, 'name', team.captain.email)},
+            "captain": {
+                "user_id": getattr(team.captain, 'id', None),
+                "name": getattr(team.captain, 'name', team.captain.email),
+                "email": getattr(team.captain, 'email', '')
+            },
             "sport": {"sport_id": team.sport.sport_id, "sport_name": team.sport.sport_name},
             # Use len of in-memory list to avoid extra COUNT query
             "member_count": len(members_data),
