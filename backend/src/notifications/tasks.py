@@ -6,6 +6,7 @@ import logging
 from threading import Thread
 from typing import Optional, Dict, Any, List
 from django.contrib.auth import get_user_model
+from django.db import close_old_connections
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,9 @@ def send_notification_async(user_id: int, title: str, body: str, data: Optional[
     """
     def _send():
         try:
+            # Close old connections to ensure fresh database state
+            close_old_connections()
+            
             from .utils import FCMNotificationSender
             
             user = User.objects.get(id=user_id)
@@ -36,6 +40,9 @@ def send_notification_async(user_id: int, title: str, body: str, data: Optional[
             logger.error(f"User {user_id} not found for notification")
         except Exception as e:
             logger.error(f"Failed to send async notification to user {user_id}: {e}")
+        finally:
+            # Close connections after thread completes
+            close_old_connections()
     
     if sync_for_tests:
         # Run synchronously for tests to avoid transaction isolation issues
@@ -57,6 +64,9 @@ def broadcast_notification_async(title: str, body: str, data: Optional[Dict[str,
     """
     def _broadcast():
         try:
+            # Close old connections to ensure fresh database state
+            close_old_connections()
+            
             from .utils import FCMNotificationSender
             
             sender = FCMNotificationSender()
@@ -71,6 +81,9 @@ def broadcast_notification_async(title: str, body: str, data: Optional[Dict[str,
             logger.info(f"Async broadcast notification sent (excluded: {exclude_user_id})")
         except Exception as e:
             logger.error(f"Failed to broadcast async notification: {e}")
+        finally:
+            # Close connections after thread completes
+            close_old_connections()
     
     thread = Thread(target=_broadcast, daemon=True)
     thread.start()

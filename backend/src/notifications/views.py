@@ -27,7 +27,8 @@ class RegisterDeviceView(APIView):
                     'is_active': True,
                 }
             )
-            logger.info(f"Device registered: {device_token} for user {user.id}")
+            action = 'created' if created else 'updated'
+            logger.info(f"Device {action}: {device_token[:20]}... for user {user.id} ({user.email})")
             return Response({'detail': 'Device registered.'}, status=status.HTTP_201_CREATED)
         logger.error(f"Device registration failed: {serializer.errors}")
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

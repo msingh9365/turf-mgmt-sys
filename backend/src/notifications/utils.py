@@ -164,6 +164,11 @@ class FCMNotificationSender:
         
         # Build token->user mapping for notification record creation
         device_list = list(devices)
+        logger.info(f"[BROADCAST] Found {len(device_list)} active devices for broadcast (excluded: {exclude_user.email if exclude_user else 'none'})")
+        
+        # Log first few devices for debugging
+        for d in device_list[:5]:
+            logger.info(f"[BROADCAST]   Device {d.id}: user={d.user.email}, token={d.device_token[:20]}..., is_active={d.is_active}")
         device_tokens = [d.device_token for d in device_list]
         token_to_user = {d.device_token: d.user for d in device_list}
         
