@@ -77,6 +77,7 @@ INSTALLED_APPS = [
     # Local apps
     "users",
     'otp',
+    "forgot_password",
 
     "bookings",
     "events",

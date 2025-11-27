@@ -18,4 +18,6 @@ urlpatterns = [
     # OTP endpoints (available under /api/otp/...)
     path("api/otp/", include("otp.urls")),
     path("api/profile/", include("profile_app.urls")), # /api/profile/me/ (combined profile + achievements)
+    # Forgot password endpoints (available under /api/forgot-password/...)
+    path("api/forgot-password/", include("forgot_password.urls")),
 ]
