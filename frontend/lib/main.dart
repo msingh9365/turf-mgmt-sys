@@ -12,6 +12,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'profile/create_profile_page.dart';
 import 'api/notifications_api.dart';
+import 'dart:async';
 
 List<Map<String, dynamic>> globalNotifications = [];
 int globalUnreadCount = 0;
@@ -54,47 +55,35 @@ final List<Map<String, dynamic>> globalBookings = [
     ],
   },
 ];
-void main() async {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
-
   await FirebaseMessaging.instance.requestPermission();
 
-  // ✅ Always keep this here
-  FirebaseMessaging.instance.onTokenRefresh.listen((newToken) async {
-    final prefs = await SharedPreferences.getInstance();
-    final jwt = prefs.getString("access_token");
-    if (jwt == null) return;
+  // 🔐 Repair session if app opened after long inactive time
+  final prefs = await SharedPreferences.getInstance();
+  final jwt = prefs.getString("access_token");
+  if (jwt != null) {
+    print("🔍 Checking token validity on app startup…");
+    if (!await AuthService().isTokenValid()) {
+      print("⚠️ Access expired → attempting refresh…");
+      final newToken = await AuthService().refreshAccessToken();
+      if (newToken != null) {
+        print("🔓 Refresh success → re-registering FCM");
+        await PushTokenService.registerDeviceToken();
+      } else {
+        print("🚫 Refresh failed → user logged out automatically");
+        await prefs.clear();
+      }
+    } else {
+      print("🔑 Token still valid → re-registering FCM to be safe");
+      await PushTokenService.registerDeviceToken();
+    }
+  }
 
-    await http.post(
-      Uri.parse(
-        "https://turf-mgmt-sys.onrender.com/api/notifications/register/",
-      ),
-      headers: {
-        "Authorization": "Bearer $jwt",
-        "Content-Type": "application/json",
-      },
-      body: jsonEncode({"device_token": newToken, "device_type": "android"}),
-    );
-  });
-
-  // Your existing listeners (unchanged)
-  FirebaseMessaging.onMessage.listen((message) {
-    globalNotifications.insert(0, {
-      "title": message.notification?.title ?? "Notification",
-      "message": message.notification?.body ?? "",
-      "time": "Just now",
-      "is_read": false,
-    });
-  });
-
-  FirebaseMessaging.onMessageOpenedApp.listen((message) {
-    globalNotifications.insert(0, {
-      "title": message.notification?.title ?? "Notification",
-      "message": message.notification?.body ?? "",
-      "time": "Just now",
-      "is_read": false,
-    });
+  // 🔄 Auto re-register refreshed FCM tokens
+  FirebaseMessaging.instance.onTokenRefresh.listen((_) {
+    PushTokenService.registerDeviceToken();
   });
 
   runApp(const MyApp());
@@ -123,9 +112,15 @@ class _IntroScreenState extends State<IntroScreen> {
   late final VideoPlayerController _controller;
   bool _navigated = false;
 
+  // ⭐ store future target screen decided during intro
+  Widget? _targetScreen;
+
   @override
   void initState() {
     super.initState();
+
+    // ⭐ Start backend/auth check in background immediately
+    _prepareNextScreen();
 
     _controller = VideoPlayerController.asset('assets/intro.mp4')
       ..initialize().then((_) {
@@ -134,8 +129,7 @@ class _IntroScreenState extends State<IntroScreen> {
           ..setLooping(false)
           ..setVolume(0.0)
           ..play();
-
-        setState(() {}); // refresh to show first frame immediately
+        setState(() {});
       });
 
     _controller.addListener(() {
@@ -149,25 +143,76 @@ class _IntroScreenState extends State<IntroScreen> {
     });
   }
 
-  void _goToHome() async {
+  // ⭐ Background check asynchronous
+  Future<void> _prepareNextScreen() async {
     final prefs = await SharedPreferences.getInstance();
-    final refreshToken = prefs.getString("refresh_token");
+    final access = prefs.getString("access_token");
+    final refresh = prefs.getString("refresh_token");
 
-    Widget nextScreen = const LoginPage();
+    if (access == null && refresh == null) {
+      _targetScreen = const LoginPage();
+      return;
+    }
 
-    if (refreshToken != null) {
-      final newToken = await AuthService().refreshAccessToken();
-      if (newToken != null) {
-        nextScreen = const HomePage();
+    final valid = await AuthService().isTokenValid();
+    if (!valid && refresh != null) {
+      final newAccess = await AuthService().refreshAccessToken();
+      if (newAccess == null) {
+        await prefs.clear();
+        _targetScreen = const LoginPage();
+        return;
       }
     }
 
+    try {
+      final response = await _authService.authGet(
+        Uri.parse("https://turf-mgmt-sys.onrender.com/api/profile/me/"),
+      );
+
+      if (response.statusCode == 200) {
+        await prefs.setBool("profile_created", true);
+        _targetScreen = const HomePage();
+        return;
+      }
+    } catch (_) {}
+
+    _targetScreen = const CreateProfilePage();
+  }
+
+  void _goToHome() async {
     if (!mounted) return;
 
+    // ⭐ If background check already done → direct skip to result
+    if (_targetScreen != null) {
+      _safeGo(_targetScreen!);
+      return;
+    }
+
+    // ⚙️ Else, fallback to Splash Loading Screen
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => const SplashLoadingScreen()),
+    );
+  }
+
+  // Prevents crashes + repeated navigation
+  void _safeGo(Widget screen) {
+    if (!mounted) return;
+    Future.delayed(const Duration(milliseconds: 150), () {
+      if (!mounted) return;
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => screen),
+      );
+    });
+  }
+
+  void _navigate(Widget screen) {
+    if (!mounted) return;
     Navigator.pushReplacement(
       context,
       PageRouteBuilder(
-        pageBuilder: (_, __, ___) => nextScreen,
+        pageBuilder: (_, __, ___) => screen,
         transitionsBuilder: (_, anim, __, child) =>
             FadeTransition(opacity: anim, child: child),
         transitionDuration: const Duration(milliseconds: 700),
@@ -176,14 +221,7 @@ class _IntroScreenState extends State<IntroScreen> {
   }
 
   @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    // exact background color sampled from your intro video
     const Color bgColor = Color(0xFFAAC4A0);
 
     return Scaffold(
@@ -210,16 +248,24 @@ class _IntroScreenState extends State<IntroScreen> {
 // ---------------------- Auth placeholder + helper UI ----------------------
 class AuthService {
   Future<bool> login({required String email, required String password}) async {
+    print("=== AuthService.login CALLED ===");
+    print("Login email: $email, password length: ${password.length}");
+
     try {
       final uri = Uri.parse(
         'https://turf-mgmt-sys.onrender.com/api/auth/login/',
       );
+
+      print("Sending POST to $uri");
 
       final response = await http.post(
         uri,
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'email': email, 'password': password}),
       );
+
+      print("Login response status: ${response.statusCode}");
+      print("Login response body: ${response.body}");
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -232,17 +278,43 @@ class AuthService {
           await prefs.setString('access_token', accessToken);
           await prefs.setString('refresh_token', refreshToken);
 
-          // ✅ Register device token ONCE per login
-          await _registerFcmDeviceWithBackend();
+          await PushTokenService.registerDeviceToken();
 
-          return true; // ✅ Do NOT return before this line
+          print("=== LOGIN SUCCESS: tokens saved ===");
+          return true;
+        } else {
+          print("!!! LOGIN ERROR: 200 but no tokens in body");
         }
+      } else {
+        print("!!! LOGIN FAILED with status ${response.statusCode}");
       }
       return false;
-    } catch (e) {
-      print('Login error: $e');
+    } catch (e, st) {
+      print('!!! Login error (exception): $e');
+      print(st);
       return false;
     }
+  }
+  // ==================== TEAM API CALLS ====================
+
+  Future<http.Response> bulkUpdateMembers(
+    int teamId,
+    List<String> emails,
+  ) async {
+    final url = Uri.parse(
+      "https://turf-mgmt-sys.onrender.com/api/teams/$teamId/bulk-update-members/",
+    );
+    return authPost(url, {"member_emails": emails});
+  }
+
+  Future<http.Response> transferCaptain(
+    int teamId,
+    int newCaptainUserId,
+  ) async {
+    final url = Uri.parse(
+      "https://turf-mgmt-sys.onrender.com/api/teams/$teamId/transfer-captain/",
+    );
+    return authPost(url, {"new_captain_user_id": newCaptainUserId});
   }
 
   Future<bool> register({
@@ -287,22 +359,54 @@ class AuthService {
   }
 
   Future<bool> sendOtp({required String email}) async {
-    final uri = Uri.parse("https://turf-mgmt-sys.onrender.com//send-otp/");
+    final uri = Uri.parse("https://turf-mgmt-sys.onrender.com/api/otp/send/");
     final res = await http.post(
       uri,
       headers: {"Content-Type": "application/json"},
       body: jsonEncode({"email": email}),
     );
+    print("OTP SEND STATUS: ${res.statusCode} - ${res.body}");
     return res.statusCode == 200;
   }
 
   Future<bool> verifyOtp({required String email, required String otp}) async {
-    final uri = Uri.parse("https://turf-mgmt-sys.onrender.com//verify-otp/");
+    final uri = Uri.parse("https://turf-mgmt-sys.onrender.com/api/otp/verify/");
     final res = await http.post(
       uri,
       headers: {"Content-Type": "application/json"},
       body: jsonEncode({"email": email, "otp": otp}),
     );
+    print("OTP VERIFY STATUS: ${res.statusCode} - ${res.body}");
+    return res.statusCode == 200;
+  }
+
+  Future<bool> resetPassword({
+    required String email,
+    required String otp,
+    required String password,
+  }) async {
+    final uri = Uri.parse(
+      "https://turf-mgmt-sys.onrender.com/api/auth/reset-password/",
+    );
+
+    print("🔐 CALLING RESET PASSWORD API");
+    print("📩 Email: $email");
+    print("🔢 OTP: $otp");
+    print("🔑 New Password Length: ${password.length}");
+
+    final body = {"email": email, "otp": otp, "new_password": password};
+
+    print("📦 REQUEST BODY: ${jsonEncode(body)}");
+
+    final res = await http.post(
+      uri,
+      headers: {"Content-Type": "application/json"},
+      body: jsonEncode(body),
+    );
+
+    print("📡 RESET RESPONSE STATUS: ${res.statusCode}");
+    print("📝 RESET RESPONSE BODY: ${res.body}");
+
     return res.statusCode == 200;
   }
 
@@ -344,6 +448,28 @@ class AuthService {
     // ✅ Refresh failed → logout automatically
     await prefs.clear();
     return null;
+  }
+
+  Future<http.Response> authPut(Uri url, Map data) async {
+    final prefs = await SharedPreferences.getInstance();
+    String? accessToken = prefs.getString("access_token");
+
+    if (!await isTokenValid()) {
+      accessToken = await refreshAccessToken();
+      if (accessToken == null) {
+        await prefs.clear();
+        throw Exception("Session expired. Please login again.");
+      }
+    }
+
+    return http.put(
+      url,
+      headers: {
+        "Authorization": "Bearer $accessToken",
+        "Content-Type": "application/json",
+      },
+      body: jsonEncode(data),
+    );
   }
 
   Future<http.Response> authGet(Uri url) async {
@@ -468,6 +594,63 @@ void showGlassAlert(BuildContext context, String message) {
   });
 }
 
+class PushTokenService {
+  static Future<void> registerDeviceToken() async {
+    print("🚀 registerDeviceToken() triggered");
+
+    final prefs = await SharedPreferences.getInstance();
+    String? jwt = prefs.getString("access_token");
+
+    // No login yet → skip silently
+    if (jwt == null) {
+      print("⚠️ No JWT — skipping FCM registration");
+      return;
+    }
+
+    // Refresh JWT if expired
+    if (!await AuthService().isTokenValid()) {
+      print("🔄 Access Token expired → refreshing...");
+      jwt = await AuthService().refreshAccessToken();
+
+      if (jwt == null) {
+        print("❌ Refresh failed — skipping push token update");
+        return;
+      }
+    }
+
+    String? token = await FirebaseMessaging.instance.getToken();
+    if (token == null) {
+      print("⚠️ No FCM Token yet — will auto retry later");
+      return;
+    }
+
+    print("📲 FCM TOKEN: $token");
+
+    try {
+      final response = await http.post(
+        Uri.parse(
+          "https://turf-mgmt-sys.onrender.com/api/notifications/register/",
+        ),
+        headers: {
+          "Authorization": "Bearer $jwt",
+          "Content-Type": "application/json",
+        },
+        body: jsonEncode({"device_token": token, "device_type": "android"}),
+      );
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        print("🔥 Token Registered OK");
+      } else {
+        print(
+          "❌ Device Token Register Failed → ${response.statusCode} ${response.body}",
+        );
+      }
+    } catch (e) {
+      print("⚠️ Device Token Register Error: $e");
+    }
+  }
+}
+
 // ---------------------- Glass Button ----------------------
 Widget glassActionButton({
   required BuildContext context,
@@ -517,6 +700,10 @@ class GoogleAuthService {
     serverClientId:
         '806464575327-0sej44tk5f6ur3r4uiu1b1a8ht43eudv.apps.googleusercontent.com',
   );
+  static Future<void> signOutFromGoogle() async {
+    final GoogleSignIn googleSignIn = GoogleSignIn();
+    await googleSignIn.signOut();
+  }
 
   static Future<bool> signInWithGoogle() async {
     try {
@@ -539,7 +726,6 @@ class GoogleAuthService {
       );
 
       print("Google Login Response: ${response.statusCode} - ${response.body}");
-
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
 
@@ -547,6 +733,25 @@ class GoogleAuthService {
         await prefs.setString("access_token", data["access"]);
         await prefs.setString("refresh_token", data["refresh"]);
 
+        // Wait and ensure token exists before sending to backend
+        String? token = await FirebaseMessaging.instance.getToken();
+        int attempts = 0;
+
+        while (token == null && attempts < 5) {
+          await Future.delayed(const Duration(seconds: 1));
+          token = await FirebaseMessaging.instance.getToken();
+          attempts++;
+          print("Waiting for FCM token... attempt $attempts");
+        }
+
+        if (token != null) {
+          print("🔥 Sending token to backend => $token");
+          await PushTokenService.registerDeviceToken();
+        } else {
+          print("⚠️ Failed to fetch FCM token even after retries!");
+        }
+
+        print("=== GOOGLE LOGIN SUCCESS ===");
         return true;
       }
 
@@ -555,6 +760,26 @@ class GoogleAuthService {
       print("Google Sign-In Error: $e");
       return false;
     }
+  }
+
+  Future<bool> resetPassword({
+    required String email,
+    required String otp,
+    required String password,
+  }) async {
+    final uri = Uri.parse(
+      "https://turf-mgmt-sys.onrender.com/api/auth/reset-password/",
+    );
+
+    final res = await http.post(
+      uri,
+      headers: {"Content-Type": "application/json"},
+      body: jsonEncode({"email": email, "otp": otp, "new_password": password}),
+    );
+
+    print("RESET-PASSWORD STATUS: ${res.statusCode} - ${res.body}");
+
+    return res.statusCode == 200;
   }
 }
 
@@ -569,6 +794,7 @@ class _LoginPageState extends State<LoginPage> {
   final _emailCtrl = TextEditingController();
   final _passCtrl = TextEditingController();
   bool _loading = false;
+  bool _googleLoading = false;
 
   @override
   void dispose() {
@@ -664,7 +890,28 @@ class _LoginPageState extends State<LoginPage> {
                 const SizedBox(height: 12),
                 _frostedField(_passCtrl, "Password", obscure: true),
                 const SizedBox(height: 18),
-
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: GestureDetector(
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const ForgotPasswordPage(),
+                        ),
+                      );
+                    },
+                    child: Text(
+                      "Forgot password?",
+                      style: TextStyle(
+                        color: Colors.green.shade900,
+                        fontWeight: FontWeight.bold,
+                        decoration: TextDecoration.underline,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
                 _loading
                     ? const CircularProgressIndicator(color: Colors.green)
                     : glassActionButton(
@@ -672,19 +919,21 @@ class _LoginPageState extends State<LoginPage> {
                         label: "Login",
                         onTap: () async {
                           setState(() => _loading = true);
+
                           final ok = await _authService.login(
                             email: _emailCtrl.text.trim(),
                             password: _passCtrl.text,
                           );
+
                           setState(() => _loading = false);
+
                           if (ok) {
                             showGlassAlert(context, "Successfully logged in");
-
-                            final nextScreen =
-                                await _decideNextScreen(); // ✅ Await here
                             Navigator.pushAndRemoveUntil(
                               context,
-                              MaterialPageRoute(builder: (_) => nextScreen),
+                              MaterialPageRoute(
+                                builder: (_) => const SplashLoadingScreen(),
+                              ),
                               (r) => false,
                             );
                           } else {
@@ -695,77 +944,88 @@ class _LoginPageState extends State<LoginPage> {
                           }
                         },
                       ),
+
                 const SizedBox(height: 18),
 
                 _dividerLine(),
                 const SizedBox(height: 18),
 
-                // --- Updated Google Sign-In button ---
-                GestureDetector(
-                  onTap: () async {
-                    final ok = await GoogleAuthService.signInWithGoogle();
-                    if (ok) {
-                      showGlassAlert(context, "Signed in Successfully");
+                _googleLoading
+                    ? const CircularProgressIndicator(color: Colors.green)
+                    : GestureDetector(
+                        onTap: () async {
+                          setState(() => _googleLoading = true);
 
-                      final nextScreen =
-                          await _decideNextScreen(); // ✅ Await here
-                      Navigator.pushAndRemoveUntil(
-                        context,
-                        MaterialPageRoute(builder: (_) => nextScreen),
-                        (r) => false,
-                      );
-                    } else {
-                      showGlassAlert(context, "Google Sign-In Failed");
-                    }
-                  },
+                          await GoogleAuthService.signOutFromGoogle(); // Ensure email selection prompt
+                          final ok = await GoogleAuthService.signInWithGoogle();
 
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(40),
-                    child: BackdropFilter(
-                      filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 22,
-                          vertical: 14,
-                        ),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF4CAF50).withOpacity(0.35),
+                          setState(() => _googleLoading = false);
+
+                          if (ok) {
+                            showGlassAlert(context, "Signed in Successfully");
+
+                            // ⭐ Ensures token registered AFTER login + UI refresh
+                            await PushTokenService.registerDeviceToken();
+
+                            final nextScreen = await _decideNextScreen();
+                            Navigator.pushAndRemoveUntil(
+                              context,
+                              MaterialPageRoute(builder: (_) => nextScreen),
+                              (r) => false,
+                            );
+                          } else {
+                            showGlassAlert(context, "Google Sign-In Failed");
+                          }
+                        },
+                        child: ClipRRect(
                           borderRadius: BorderRadius.circular(40),
-                          border: Border.all(
-                            color: Colors.white.withOpacity(0.25),
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.15),
-                              blurRadius: 10,
-                              offset: const Offset(0, 5),
-                            ),
-                          ],
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Image.asset(
-                              'assets/google_logo.png',
-                              height: 24,
-                              width: 24,
-                            ),
-                            const SizedBox(width: 10),
-                            const Text(
-                              "Sign in with Google",
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 16,
-                                color: Colors.white,
+                          child: BackdropFilter(
+                            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 22,
+                                vertical: 14,
+                              ),
+                              decoration: BoxDecoration(
+                                color: const Color(
+                                  0xFF4CAF50,
+                                ).withOpacity(0.35),
+                                borderRadius: BorderRadius.circular(40),
+                                border: Border.all(
+                                  color: Colors.white.withOpacity(0.25),
+                                ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withOpacity(0.15),
+                                    blurRadius: 10,
+                                    offset: const Offset(0, 5),
+                                  ),
+                                ],
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Image.asset(
+                                    'assets/google_logo.png',
+                                    height: 24,
+                                    width: 24,
+                                  ),
+                                  const SizedBox(width: 10),
+                                  const Text(
+                                    "Sign in with Google",
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 16,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
-                          ],
+                          ),
                         ),
                       ),
-                    ),
-                  ),
-                ),
 
                 const SizedBox(height: 24),
 
@@ -804,6 +1064,200 @@ class _LoginPageState extends State<LoginPage> {
   }
 }
 
+class ForgotPasswordPage extends StatefulWidget {
+  const ForgotPasswordPage({super.key});
+
+  @override
+  State<ForgotPasswordPage> createState() => _ForgotPasswordPageState();
+}
+
+class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
+  final _emailCtrl = TextEditingController();
+  final _otpCtrl = TextEditingController();
+  final _passCtrl = TextEditingController();
+  final _repassCtrl = TextEditingController();
+
+  bool _loading = false;
+  bool _otpStep = false;
+  bool _passwordStep = false;
+
+  Widget _frostedField(
+    TextEditingController ctrl,
+    String hint, {
+    bool obscure = false,
+    TextInputType? kb,
+  }) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(12),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          decoration: BoxDecoration(
+            color: const Color(0xFFAED581).withOpacity(0.35),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.green.withOpacity(0.3)),
+          ),
+          child: TextField(
+            controller: ctrl,
+            obscureText: obscure,
+            keyboardType: kb,
+            decoration: InputDecoration(
+              border: InputBorder.none,
+              hintText: hint,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _sendOtp() async {
+    if (!_emailCtrl.text.trim().endsWith("@iitrpr.ac.in")) {
+      showGlassAlert(context, "Use @iitrpr.ac.in Email");
+      return;
+    }
+
+    setState(() => _loading = true);
+
+    final success = await _authService.sendOtp(email: _emailCtrl.text.trim());
+
+    setState(() => _loading = false);
+
+    if (success) {
+      showGlassAlert(context, "OTP Sent");
+      setState(() => _otpStep = true);
+    } else {
+      showGlassAlert(context, "Invalid Email");
+    }
+  }
+
+  Future<void> _verifyOtp() async {
+    setState(() => _loading = true);
+
+    final verified = await _authService.verifyOtp(
+      email: _emailCtrl.text.trim(),
+      otp: _otpCtrl.text.trim(),
+    );
+
+    setState(() => _loading = false);
+
+    if (verified) {
+      showGlassAlert(context, "OTP Verified");
+      setState(() => _passwordStep = true);
+    } else {
+      showGlassAlert(context, "Incorrect OTP");
+    }
+  }
+
+  Future<void> _resetPassword() async {
+    if (_passCtrl.text.trim() != _repassCtrl.text.trim()) {
+      showGlassAlert(context, "Passwords do not match");
+      return;
+    }
+
+    setState(() => _loading = true);
+
+    final ok = await _authService.resetPassword(
+      email: _emailCtrl.text.trim(),
+      otp: _otpCtrl.text.trim(),
+      password: _passCtrl.text.trim(),
+    );
+
+    setState(() => _loading = false);
+
+    if (ok) {
+      showGlassAlert(context, "Password Reset Successful");
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const LoginPage()),
+      );
+    } else {
+      showGlassAlert(context, "Failed to reset password");
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFDDECD6),
+      appBar: AppBar(
+        backgroundColor: Colors.green.withOpacity(0.1),
+        elevation: 0,
+        iconTheme: const IconThemeData(color: Colors.black87),
+        title: const Text(
+          "Forgot Password",
+          style: TextStyle(color: Colors.black87),
+        ),
+      ),
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 20),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                _frostedField(
+                  _emailCtrl,
+                  "Enter IIT Ropar Email",
+                  kb: TextInputType.emailAddress,
+                ),
+                const SizedBox(height: 12),
+
+                if (_otpStep)
+                  Column(
+                    children: [
+                      _frostedField(
+                        _otpCtrl,
+                        "Enter OTP",
+                        kb: TextInputType.number,
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                  ),
+
+                if (_passwordStep)
+                  Column(
+                    children: [
+                      _frostedField(
+                        _passCtrl,
+                        "New Password (Minimum 6 char)",
+                        obscure: true,
+                      ),
+                      const SizedBox(height: 12),
+                      _frostedField(
+                        _repassCtrl,
+                        "Re-enter Password",
+                        obscure: true,
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                  ),
+
+                _loading
+                    ? const CircularProgressIndicator(color: Colors.green)
+                    : glassActionButton(
+                        context: context,
+                        label: !_otpStep
+                            ? "Send OTP"
+                            : !_passwordStep
+                            ? "Verify OTP"
+                            : "Submit",
+                        onTap: !_otpStep
+                            ? _sendOtp
+                            : !_passwordStep
+                            ? _verifyOtp
+                            : _resetPassword,
+                      ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // ---------------------- SIGNUP PAGE ----------------------
 class SignupPage extends StatefulWidget {
   const SignupPage({super.key});
@@ -817,10 +1271,12 @@ class _SignupPageState extends State<SignupPage> {
   final _mobile = TextEditingController();
   final _pass = TextEditingController();
   final _repass = TextEditingController();
-  //bool _otpStep = false;
-  //final _otpCtrl = TextEditingController();
+  bool _googleLoading = false;
+  bool _otpStep = false;
+  final _otpCtrl = TextEditingController();
 
   bool _loading = false;
+  bool _otpVerified = false;
 
   Widget _dividerLine() => Row(
     children: const [
@@ -854,6 +1310,8 @@ class _SignupPageState extends State<SignupPage> {
             controller: ctrl,
             obscureText: obscure,
             keyboardType: kb,
+            onChanged: (_) =>
+                setState(() {}), // 🔥 Rebuild UI when text changes
             decoration: InputDecoration(
               border: InputBorder.none,
               hintText: hint,
@@ -864,48 +1322,42 @@ class _SignupPageState extends State<SignupPage> {
     );
   }
 
-  /*Future<void> _trySignup() async {
-    if (!_otpStep) {
-      setState(() => _loading = true);
-      final sent = await _authService.sendOtp(email: _email.text.trim());
-      setState(() => _loading = false);
-
-      if (sent) {
-        showGlassAlert(context, "OTP Sent to Email");
-        setState(() => _otpStep = true);
-      } else {
-        showGlassAlert(context, "OTP Send Failed");
-      }
-      return;
-    }
-
-    setState(() => _loading = true);
-    final ok = await _authService.register(
-      name: _name.text.trim(),
-      email: _email.text.trim(),
-      mobile: _mobile.text.trim(),
-      password: _pass.text.trim(),
-    );
-    setState(() => _loading = false);
-
-    if (ok) {
-      showGlassAlert(context, "Signup Successful ✅");
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const LoginPage()),
-      );
-    } else {
-      showGlassAlert(context, "Signup Failed");
-    }
-  }*/
-
   Future<void> _trySignup() async {
     if (_pass.text.trim() != _repass.text.trim()) {
       showGlassAlert(context, "Passwords do not match");
       return;
     }
 
+    // STEP 1 → Send OTP
+    if (!_otpStep) {
+      setState(() => _loading = true);
+      final sent = await _authService.sendOtp(email: _email.text.trim());
+      setState(() => _loading = false);
+
+      if (sent) {
+        showGlassAlert(context, "OTP Sent to your IITRPR Email 📩");
+        setState(() => _otpStep = true);
+      } else {
+        showGlassAlert(context, "OTP Sending Failed ❌");
+      }
+      return;
+    }
+
+    // STEP 2 → Verify OTP then Register
     setState(() => _loading = true);
+    final otpOk = await _authService.verifyOtp(
+      email: _email.text.trim(),
+      otp: _otpCtrl.text.trim(),
+    );
+
+    if (!otpOk) {
+      setState(() => _loading = false);
+      showGlassAlert(context, "Invalid OTP ❌");
+      return;
+    }
+
+    showGlassAlert(context, "OTP Verified Successfully 🎉");
+
     final ok = await _authService.register(
       name: _name.text.trim(),
       email: _email.text.trim(),
@@ -915,31 +1367,41 @@ class _SignupPageState extends State<SignupPage> {
     setState(() => _loading = false);
 
     if (ok) {
-      showGlassAlert(context, "Signup Successful");
+      showGlassAlert(context, "Signup Successful 🚀");
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(builder: (_) => const LoginPage()),
       );
     } else {
-      showGlassAlert(context, "Signup Failed");
+      showGlassAlert(context, "Signup Failed ⚠️");
     }
   }
 
   Future<Widget> _decideNextScreen() async {
     final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString("access_token");
-    if (token == null) return const LoginPage();
+    final access = prefs.getString("access_token");
+
+    // 🔐 No token at all → go to Login
+    if (access == null) {
+      return const LoginPage();
+    }
 
     try {
       final res = await _authService.authGet(
         Uri.parse("https://turf-mgmt-sys.onrender.com/api/profile/me/"),
       );
-      if (res.statusCode == 200) {
-        return const HomePage(); // ✅ Profile exists
-      }
-    } catch (_) {}
 
-    return const CreateProfilePage(); // ✅ No profile yet → move to create profile
+      // ✅ Profile exists → straight to Home
+      if (res.statusCode == 200) {
+        return const HomePage();
+      }
+
+      // ❌ Any non-200 (404 / 403 / etc) → force Create Profile
+      return const CreateProfilePage();
+    } catch (e) {
+      // 🌐 Network / parsing error → still push user to CreateProfile
+      return const CreateProfilePage();
+    }
   }
 
   @override
@@ -964,7 +1426,11 @@ class _SignupPageState extends State<SignupPage> {
               children: [
                 _frostedField(_name, "Full name"),
                 const SizedBox(height: 10),
-                _frostedField(_email, "Email", kb: TextInputType.emailAddress),
+                _frostedField(
+                  _email,
+                  "Email (@iitrpr.ac.in)",
+                  kb: TextInputType.emailAddress,
+                ),
                 const SizedBox(height: 10),
                 _frostedField(
                   _mobile,
@@ -972,11 +1438,15 @@ class _SignupPageState extends State<SignupPage> {
                   kb: TextInputType.phone,
                 ),
                 const SizedBox(height: 10),
-                _frostedField(_pass, "Password", obscure: true),
+                _frostedField(
+                  _pass,
+                  "Password (minimum 6 character)",
+                  obscure: true,
+                ),
                 const SizedBox(height: 10),
                 _frostedField(_repass, "Re-enter password", obscure: true),
                 const SizedBox(height: 18),
-                /*if (_loading)
+                if (_loading)
                   const CircularProgressIndicator(color: Colors.green)
                 else if (!_otpStep)
                   glassActionButton(
@@ -989,117 +1459,174 @@ class _SignupPageState extends State<SignupPage> {
                     _otpCtrl,
                     "Enter OTP",
                     kb: TextInputType.number,
-                  ),*/
-                _loading
-                    ? const CircularProgressIndicator(color: Colors.green)
-                    : glassActionButton(
+                  ),
+                  const SizedBox(height: 12),
+
+                  // 🔹 Verify OTP Button (before signup)
+                  Opacity(
+                    opacity: _otpCtrl.text.trim().length == 6 ? 1 : 0.4,
+                    child: IgnorePointer(
+                      ignoring: _otpCtrl.text.trim().length != 6,
+                      child: glassActionButton(
                         context: context,
-                        label: "Submit",
-                        onTap: _trySignup,
+                        label: "Verify OTP",
+                        onTap: () async {
+                          setState(() => _loading = true);
+                          final ok = await _authService.verifyOtp(
+                            email: _email.text.trim(),
+                            otp: _otpCtrl.text.trim(),
+                          );
+                          setState(() => _loading = false);
+
+                          if (ok) {
+                            showGlassAlert(context, "OTP Verified 🎉");
+                            setState(
+                              () => _otpVerified = true,
+                            ); // 🔓 unlock signup button
+                          } else {
+                            showGlassAlert(context, "Invalid OTP ❌");
+                          }
+                        },
                       ),
-                const SizedBox(height: 12),
-
-                /*GestureDetector(
-                  onTap: () async {
-                    final ok = await _authService.verifyOtp(
-                      email: _email.text.trim(),
-                      otp: _otpCtrl.text.trim(),
-                    );
-                    if (ok) {
-                      showGlassAlert(context, "OTP Verified ✅");
-                      setState(() {});
-                    } else {
-                      showGlassAlert(context, "Invalid OTP ❌");
-                    }
-                  },
-                  child: Text(
-                    "Verify OTP",
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      color: Colors.green.shade900,
-                      decoration: TextDecoration.underline,
                     ),
                   ),
-                ),
 
-                const SizedBox(height: 18),
+                  const SizedBox(height: 14),
 
-                Opacity(
-                  opacity: _otpCtrl.text.trim().length == 6 ? 1 : 0.4,
-                  child: IgnorePointer(
-                    ignoring: _otpCtrl.text.trim().length != 6,
-                    child: glassActionButton(
-                      context: context,
-                      label: "Signup",
-                      onTap: _trySignup,
-                    ),
-                  ),
-                ),
-              ],*/
-
-                //if (!_otpStep) ...[
-                const SizedBox(height: 18),
-                _dividerLine(),
-                const SizedBox(height: 18),
-                GestureDetector(
-                  onTap: () async {
-                    final ok = await GoogleAuthService.signInWithGoogle();
-                    if (ok) {
-                      showGlassAlert(context, "Signed in Successfully");
-
-                      final nextScreen =
-                          await _decideNextScreen(); // ✅ Await here
-                      Navigator.pushAndRemoveUntil(
-                        context,
-                        MaterialPageRoute(builder: (_) => nextScreen),
-                        (r) => false,
+                  // 🔹 Resend OTP (instead of verify text)
+                  GestureDetector(
+                    onTap: () async {
+                      final sent = await _authService.sendOtp(
+                        email: _email.text.trim(),
                       );
-                    } else {
-                      showGlassAlert(context, "Google Sign-In Failed");
-                    }
-                  },
+                      if (sent) {
+                        showGlassAlert(context, "OTP Resent 📩");
+                      } else {
+                        showGlassAlert(context, "Failed to resend OTP ❌");
+                      }
+                    },
+                    child: Text(
+                      "Resend OTP",
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.green.shade900,
+                        decoration: TextDecoration.underline,
+                      ),
+                    ),
+                  ),
 
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(40),
-                    child: BackdropFilter(
-                      filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 22,
-                          vertical: 14,
-                        ),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF4CAF50).withOpacity(0.35),
-                          borderRadius: BorderRadius.circular(40),
-                          border: Border.all(
-                            color: Colors.white.withOpacity(0.25),
-                          ),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Image.asset(
-                              'assets/google_logo.png',
-                              height: 24,
-                              width: 24,
-                            ),
-                            const SizedBox(width: 10),
-                            const Text(
-                              "Sign up with Google",
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 16,
-                                color: Colors.white,
+                  const SizedBox(height: 20),
+
+                  // 🔹 Signup Only after OTP verified
+                  Opacity(
+                    opacity: _otpVerified ? 1 : 0.4,
+                    child: IgnorePointer(
+                      ignoring: !_otpVerified,
+                      child: glassActionButton(
+                        context: context,
+                        label: "Signup",
+                        onTap: () async {
+                          setState(() => _loading = true);
+                          final ok = await _authService.register(
+                            name: _name.text.trim(),
+                            email: _email.text.trim(),
+                            mobile: _mobile.text.trim(),
+                            password: _pass.text.trim(),
+                          );
+                          setState(() => _loading = false);
+
+                          if (ok) {
+                            showGlassAlert(context, "Signup Successful 🚀");
+                            Navigator.pushReplacement(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => const LoginPage(),
+                              ),
+                            );
+                          } else {
+                            showGlassAlert(context, "Signup Failed ⚠️");
+                          }
+                        },
+                      ),
+                    ),
+                  ),
+                ],
+                if (!_otpStep) ...[
+                  const SizedBox(height: 18),
+                  _dividerLine(),
+                  const SizedBox(height: 18),
+
+                  _googleLoading
+                      ? const CircularProgressIndicator(color: Colors.green)
+                      : GestureDetector(
+                          onTap: () async {
+                            setState(() => _googleLoading = true);
+
+                            await GoogleAuthService.signOutFromGoogle(); // Makes Google re-prompt email
+                            final ok =
+                                await GoogleAuthService.signInWithGoogle();
+
+                            setState(() => _googleLoading = false);
+
+                            if (ok) {
+                              showGlassAlert(context, "Signed in Successfully");
+
+                              // ⭐ Ensures token registered AFTER login + UI refresh
+                              await PushTokenService.registerDeviceToken();
+
+                              final nextScreen = await _decideNextScreen();
+                              Navigator.pushAndRemoveUntil(
+                                context,
+                                MaterialPageRoute(builder: (_) => nextScreen),
+                                (r) => false,
+                              );
+                            } else {
+                              showGlassAlert(context, "Google Sign-In Failed");
+                            }
+                          },
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(40),
+                            child: BackdropFilter(
+                              filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 22,
+                                  vertical: 14,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(
+                                    0xFF4CAF50,
+                                  ).withOpacity(0.35),
+                                  borderRadius: BorderRadius.circular(40),
+                                  border: Border.all(
+                                    color: Colors.white.withOpacity(0.25),
+                                  ),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Image.asset(
+                                      'assets/google_logo.png',
+                                      height: 24,
+                                      width: 24,
+                                    ),
+                                    const SizedBox(width: 10),
+                                    const Text(
+                                      "Sign up with Google",
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 16,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
-                          ],
+                          ),
                         ),
-                      ),
-                    ),
-                  ),
-                ),
-                //],
+                ],
               ],
             ),
           ),
@@ -1172,6 +1699,188 @@ Future<bool> isInsideCampus() async {
   }
 }
 
+// ---------------------- EVENT TRANSLATION + CACHE ----------------------
+
+const Map<String, int> sportNameToId = {
+  "Football": 1,
+  "Basketball": 2,
+  "Cricket": 3,
+  "Tennis": 4,
+  "Badminton": 5,
+  "Volleyball": 6,
+  "Hockey": 7,
+  "Table Tennis": 8,
+};
+
+// Lowercase helper for free-text sport name input
+final Map<String, int> sportNameToIdLower = {
+  for (final e in sportNameToId.entries) e.key.toLowerCase(): e.value,
+};
+
+// Poster filename -> unique poster_id sent to backend
+const Map<String, String> posterAssetToId = {
+  // FOOTBALL
+  "football_1.png": "101",
+  "football_2.png": "102",
+  "football_3.png": "103",
+  "football_4.png": "104",
+  "football_5.png": "105",
+
+  // BASKETBALL
+  "basketball_1.png": "201",
+  "basketball_2.png": "202",
+  "basketball_3.png": "203",
+  "basketball_4.png": "204",
+  "basketball_5.png": "205",
+
+  // CRICKET
+  "cricket_1.png": "301",
+  "cricket_2.png": "302",
+  "cricket_3.png": "303",
+  "cricket_4.png": "304",
+  "cricket_5.png": "305",
+
+  // BADMINTON
+  "badminton_1.png": "401",
+  "badminton_2.png": "402",
+  "badminton_3.png": "403",
+  "badminton_4.png": "404",
+  "badminton_5.png": "405",
+
+  "hockey_1.jpg": "501",
+  "table_tennis_1.jpg": "601",
+  "volley_ball_1.jpg": "701",
+  "tennis_1.jpg": "801",
+};
+
+// Reverse map: poster_id from backend -> asset filename
+final Map<String, String> posterIdToAsset = {
+  for (final e in posterAssetToId.entries) e.value: e.key,
+};
+
+// sport_id -> name (for details page)
+final Map<int, String> sportIdToName = {
+  for (final e in sportNameToId.entries) e.value: e.key,
+};
+
+class AppEvent {
+  final int id;
+  final String sportName;
+  final String posterId;
+  final String posterAsset;
+  final String title;
+  final String description;
+  final String locationText;
+  final DateTime startsAt;
+  final String organizerContact;
+  final String organizerName;
+  final DateTime endsAt;
+
+  AppEvent({
+    required this.id,
+    required this.sportName,
+    required this.posterId,
+    required this.posterAsset,
+    required this.title,
+    required this.description,
+    required this.locationText,
+    required this.startsAt,
+    required this.endsAt,
+    required this.organizerContact,
+    required this.organizerName,
+  });
+
+  factory AppEvent.fromJson(Map<String, dynamic> json) {
+    final int sportId = json['sport_id'] is int ? json['sport_id'] as int : 0;
+
+    // sport_id → sport_name mapping
+    final String sportName = sportNameToId.entries
+        .firstWhere(
+          (e) => e.value == sportId,
+          orElse: () => const MapEntry("Unknown", -1),
+        )
+        .key;
+
+    // Poster mapping table (Backend poster_id → Asset)
+    const Map<String, String> posterIdToAsset = {
+      // Football
+      "101": "football_1.png",
+      "102": "football_2.png",
+      "103": "football_3.png",
+      "104": "football_4.png",
+      "105": "football_5.png",
+
+      // Basketball
+      "201": "basketball_1.png",
+      "202": "basketball_2.png",
+      "203": "basketball_3.png",
+      "204": "basketball_4.png",
+      "205": "basketball_5.png",
+
+      // Cricket
+      "301": "cricket_1.png",
+      "302": "cricket_2.png",
+      "303": "cricket_3.png",
+      "304": "cricket_4.png",
+      "305": "cricket_5.png",
+
+      // Badminton
+      "401": "badminton_1.png",
+      "402": "badminton_2.png",
+      "403": "badminton_3.png",
+      "404": "badminton_4.png",
+      "405": "badminton_5.png",
+
+      "501": "hockey_1.jpg",
+      "601": "table_tennis_1.jpg",
+      "701": "volley_ball_1.jpg",
+      "801": "tennis_1.jpg",
+    };
+
+    final String posterId = json['poster_id']?.toString() ?? '';
+    final String posterAsset = posterIdToAsset[posterId] ?? "default_event.png";
+
+    return AppEvent(
+      id: json['id'] ?? 0,
+      sportName: sportName,
+      posterId: posterId,
+      posterAsset: posterAsset,
+      title: json['title']?.toString() ?? '',
+      description: json['description']?.toString() ?? '',
+      locationText: json['location_text']?.toString() ?? '',
+      startsAt:
+          DateTime.tryParse(json['starts_at'] ?? '')?.toLocal() ??
+          DateTime.now(),
+      endsAt:
+          DateTime.tryParse(json['ends_at'] ?? '')?.toLocal() ?? DateTime.now(),
+      organizerContact: json['organizer_contact']?.toString() ?? '',
+      organizerName: json['organizer_name']?.toString() ?? '',
+    );
+  }
+}
+
+class EventCache {
+  static List<AppEvent> _events = [];
+
+  static List<AppEvent> get events => _events;
+
+  static void setEvents(List<AppEvent> newEvents) {
+    _events = newEvents;
+  }
+
+  static AppEvent? getById(int id) {
+    try {
+      return _events.firstWhere((e) => e.id == id);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static void clear() {
+    _events = [];
+  }
+}
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -1180,8 +1889,12 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  final _pageController = PageController(initialPage: 1);
+  final _pageController = PageController(initialPage: 1000);
   late int _selectedIndex;
+
+  bool _isLoadingEvents = false;
+  String? _eventsError;
+  List<AppEvent> _events = [];
 
   @override
   void initState() {
@@ -1193,31 +1906,76 @@ class _HomePageState extends State<HomePage> {
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       requestLocationPermission(context);
+      _loadEvents();
+      _fetchProfileAndCache();
     });
   }
 
-  final List<Map<String, String>> _events = [
-    {
-      'title': 'Football Tournament',
-      'location': 'IIT RPR Stadium',
-      'image': 'football_tournament.png',
-    },
-    {
-      'title': 'Basketball Match',
-      'location': 'Basketball Court',
-      'image': 'basketball_match.png',
-    },
-    {
-      'title': 'Cricket Finals',
-      'location': 'Main Ground',
-      'image': 'cricket_match.png',
-    },
-    {
-      'title': 'Badminton League',
-      'location': 'Indoor Arena',
-      'image': 'badminton_match.png',
-    },
-  ];
+  Future<void> _loadEvents() async {
+    setState(() {
+      _isLoadingEvents = true;
+      _eventsError = null;
+    });
+
+    try {
+      final uri = Uri.parse("https://turf-mgmt-sys.onrender.com/api/events/");
+      final res = await _authService.authGet(uri);
+
+      print("EVENTS GET STATUS: ${res.statusCode}");
+      print("EVENTS GET BODY: ${res.body}");
+
+      if (res.statusCode == 200) {
+        final decoded = jsonDecode(res.body);
+
+        final List<dynamic> results =
+            (decoded["results"] ?? []) as List<dynamic>;
+
+        final events = results
+            .map((e) => AppEvent.fromJson(e as Map<String, dynamic>))
+            .toList();
+
+        final now = DateTime.now();
+        final activeEvents = events
+            .where((e) => e.endsAt.isAfter(now))
+            .toList();
+
+        EventCache.setEvents(activeEvents);
+
+        if (!mounted) return;
+        setState(() {
+          _events = activeEvents;
+        });
+      } else {
+        if (!mounted) return;
+        _eventsError = "Failed: ${res.statusCode}";
+        showGlassAlert(context, _eventsError!);
+      }
+    } catch (e) {
+      print("EVENTS GET ERROR: $e");
+      if (!mounted) return;
+      _eventsError = "Network error";
+      showGlassAlert(context, "Network error while loading events");
+    } finally {
+      if (!mounted) return;
+      setState(() => _isLoadingEvents = false);
+    }
+  }
+
+  Future<void> _fetchProfileAndCache() async {
+    try {
+      final res = await _authService.authGet(
+        Uri.parse("https://turf-mgmt-sys.onrender.com/api/profile/me/"),
+      );
+
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        await ProfileCache.saveProfile(data);
+        print("Profile updated in cache");
+      }
+    } catch (e) {
+      print("Profile fetch failed: $e");
+    }
+  }
 
   final List<Map<String, String>> _sports = [
     {'Football': 'assets/football_logo.png'},
@@ -1260,24 +2018,40 @@ class _HomePageState extends State<HomePage> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    const Text(
-                      "Upcoming Events",
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.black87,
-                      ),
+                    Row(
+                      children: [
+                        const Text(
+                          "Upcoming Events",
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.black87,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        GestureDetector(
+                          onTap: _loadEvents, // 👈 Manual refresh button
+                          child: Icon(
+                            Icons.refresh_rounded,
+                            size: 22,
+                            color: Colors.green.shade700,
+                          ),
+                        ),
+                      ],
                     ),
 
-                    // ✅ Subtle Add Event Icon Button
+                    // Add Event Button
                     GestureDetector(
-                      onTap: () {
-                        Navigator.push(
+                      onTap: () async {
+                        final created = await Navigator.push<bool>(
                           context,
                           MaterialPageRoute(
                             builder: (_) => const AddEventPage(),
                           ),
                         );
+                        if (created == true) {
+                          await _loadEvents(); // 👈 Refresh fresh data after create
+                        }
                       },
                       child: Icon(
                         Icons.add_circle_outline,
@@ -1293,54 +2067,81 @@ class _HomePageState extends State<HomePage> {
                 // ✅ Swipable Event Cards
                 SizedBox(
                   height: 220,
-                  width: double.infinity, // ✅ Force full width
-                  child: PageView.builder(
-                    controller: _pageController,
-                    padEnds: false, // ✅ Removes automatic right-side gap
-                    onPageChanged: (index) {
-                      if (index == _events.length + 1) {
-                        Future.delayed(const Duration(milliseconds: 300), () {
-                          _pageController.jumpToPage(1);
-                        });
-                      } else if (index == 0) {
-                        Future.delayed(const Duration(milliseconds: 300), () {
-                          _pageController.jumpToPage(_events.length);
-                        });
-                      }
-                    },
-                    itemCount: _events.length + 2,
-                    itemBuilder: (context, index) {
-                      int realIndex;
-                      if (index == 0) {
-                        realIndex = _events.length - 1;
-                      } else if (index == _events.length + 1) {
-                        realIndex = 0;
-                      } else {
-                        realIndex = index - 1;
+                  width: double.infinity,
+                  child: Builder(
+                    builder: (context) {
+                      if (_isLoadingEvents) {
+                        return Center(
+                          child: SizedBox(
+                            width: 420, // Increased from 120 → 220
+                            height: 420,
+                            child: Image.asset(
+                              "assets/custom_loader.gif",
+                              fit: BoxFit.contain,
+                            ),
+                          ),
+                        );
                       }
 
-                      final event = _events[realIndex];
-                      return AnimatedBuilder(
-                        animation: _pageController,
-                        builder: (context, child) {
-                          double scale = 1.0;
-                          if (_pageController.position.haveDimensions) {
-                            scale = (_pageController.page! - index).abs();
-                            scale = (1 - (scale * 0.1)).clamp(0.9, 1.0);
-                          }
-                          return Transform.scale(
-                            scale: scale,
+                      if (_events.isEmpty) {
+                        return Center(
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(horizontal: 16),
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(16),
+                              color: Colors.green.shade100.withOpacity(0.5),
+                              border: Border.all(color: Colors.green.shade300),
+                            ),
+                            child: const Text(
+                              "No events to display",
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        );
+                      }
+
+                      return PageView.builder(
+                        controller: _pageController,
+                        itemCount: null, // infinite scrolling
+                        itemBuilder: (context, index) {
+                          final event =
+                              _events[index % _events.length]; // LOOPING
+
+                          return GestureDetector(
+                            onTap: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) =>
+                                      EventDetailsPage(eventId: event.id),
+                                ),
+                              );
+                            },
                             child: Container(
                               margin: const EdgeInsets.symmetric(
                                 horizontal: 16,
-                              ), // ✅ Equal on both sides
-                              width: MediaQuery.of(
-                                context,
-                              ).size.width, // ✅ Fill screen width
+                              ),
                               child: FrostedGlassCard(
-                                title: event['title']!,
-                                location: event['location']!,
-                                image: event['image'],
+                                title: event.title,
+                                location: event.locationText,
+                                image: event.posterAsset.isNotEmpty
+                                    ? "event_posters/${event.posterAsset}"
+                                    : null,
+
+                                endsAt: event.endsAt,
+                                onTap: () {
+                                  Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (_) =>
+                                          EventDetailsPage(eventId: event.id),
+                                    ),
+                                  );
+                                },
                               ),
                             ),
                           );
@@ -1362,6 +2163,15 @@ class _HomePageState extends State<HomePage> {
                       dotWidth: 8,
                       expansionFactor: 3,
                     ),
+                    onDotClicked: (index) {
+                      _pageController.animateToPage(
+                        _pageController.page!.toInt() -
+                            (_pageController.page!.toInt() % _events.length) +
+                            index,
+                        duration: const Duration(milliseconds: 300),
+                        curve: Curves.ease,
+                      );
+                    },
                   ),
                 ),
                 const SizedBox(height: 24),
@@ -1402,26 +2212,40 @@ class _HomePageState extends State<HomePage> {
 }
 
 class EventDetailsPage extends StatelessWidget {
-  final String title;
-  final String location;
-  final String? image;
+  final int eventId;
 
-  const EventDetailsPage({
-    super.key,
-    required this.title,
-    required this.location,
-    this.image,
-  });
+  const EventDetailsPage({super.key, required this.eventId});
 
   @override
   Widget build(BuildContext context) {
+    final event = EventCache.getById(eventId);
+
+    if (event == null) {
+      // Should not normally happen, but safe fallback
+      return Scaffold(
+        appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          iconTheme: const IconThemeData(color: Colors.black87),
+          title: const Text(
+            "Event Details",
+            style: TextStyle(
+              color: Colors.black87,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+        body: const Center(child: Text("Event not found in cache.")),
+      );
+    }
+
     return Scaffold(
       backgroundColor: const Color(0xFFF1FAF1),
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
         iconTheme: const IconThemeData(color: Colors.black87),
-        title: Text(
+        title: const Text(
           "Event Details",
           style: TextStyle(color: Colors.black87, fontWeight: FontWeight.bold),
         ),
@@ -1434,7 +2258,7 @@ class EventDetailsPage extends StatelessWidget {
             ClipRRect(
               borderRadius: BorderRadius.circular(18),
               child: Image.asset(
-                "assets/$image",
+                "assets/event_posters/${event.posterAsset}",
                 height: 220,
                 width: double.infinity,
                 fit: BoxFit.cover,
@@ -1442,20 +2266,48 @@ class EventDetailsPage extends StatelessWidget {
             ),
 
             const SizedBox(height: 20),
+            _infoTile(
+              "Tournament Title",
+              event.title,
+              Icons.emoji_events_outlined,
+            ),
 
-            _infoTile("Tournament Title", title, Icons.emoji_events_outlined),
-            _infoTile("Location", location, Icons.place_outlined),
-            _infoTile("Sport", "Football", Icons.sports_soccer),
-            _infoTile("Date & Time", "12 Feb 2025 • 4:00 PM", Icons.schedule),
+            _infoTile(
+              "Organizer Name",
+              event.organizerName.isEmpty
+                  ? "Not provided"
+                  : event.organizerName,
+              Icons.person_outline,
+            ),
+
             _infoTile(
               "Organizer Contact",
-              "+91 9876543210",
+              event.organizerContact,
               Icons.call_outlined,
+            ),
+
+            _infoTile("Location", event.locationText, Icons.place_outlined),
+            _infoTile("Sport", event.sportName, Icons.sports_soccer),
+
+            _infoTile(
+              "Start Date & Time",
+              "${event.startsAt.day}-${event.startsAt.month}-${event.startsAt.year} • "
+                  "${event.startsAt.hour.toString().padLeft(2, '0')}:${event.startsAt.minute.toString().padLeft(2, '0')}",
+              Icons.schedule,
+            ),
+
+            _infoTile(
+              "End Date & Time",
+              "${event.endsAt.day}-${event.endsAt.month}-${event.endsAt.year} • "
+                  "${event.endsAt.hour.toString().padLeft(2, '0')}:${event.endsAt.minute.toString().padLeft(2, '0')}",
+              Icons.event_available_outlined,
             ),
 
             _contentTile(
               "Tournament Description",
-              "Join the most competitive sports event at IIT RPR. Register soon before slots are full.",
+              event.description.isEmpty
+                  ? "No description provided."
+                  : event.description,
             ),
           ],
         ),
@@ -1507,6 +2359,7 @@ class EventDetailsPage extends StatelessWidget {
 
   Widget _contentTile(String title, String content) {
     return Container(
+      width: double.infinity, // 🟢 FULL WIDTH LIKE INFO TILES
       margin: const EdgeInsets.symmetric(vertical: 12),
       padding: const EdgeInsets.all(15),
       decoration: BoxDecoration(
@@ -1540,6 +2393,99 @@ class EventDetailsPage extends StatelessWidget {
   }
 }
 
+class SplashLoadingScreen extends StatefulWidget {
+  const SplashLoadingScreen({super.key});
+
+  @override
+  State<SplashLoadingScreen> createState() => _SplashLoadingScreenState();
+}
+
+class _SplashLoadingScreenState extends State<SplashLoadingScreen> {
+  @override
+  void initState() {
+    super.initState();
+    _checkAndNavigate();
+  }
+
+  Future<void> _checkAndNavigate() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString("access_token");
+    final profileCreated = prefs.getBool("profile_created") ?? false;
+
+    await Future.delayed(const Duration(milliseconds: 800)); // smooth UX
+
+    if (token == null) {
+      _go(const LoginPage());
+      return;
+    }
+
+    try {
+      final res = await AuthService().authGet(
+        Uri.parse("https://turf-mgmt-sys.onrender.com/api/profile/me/"),
+      );
+
+      if (res.statusCode == 200) {
+        await prefs.setBool("profile_created", true);
+        _go(const HomePage());
+        return;
+      }
+    } catch (_) {}
+
+    if (!profileCreated) {
+      _go(const CreateProfilePage());
+      return;
+    }
+
+    _go(const HomePage());
+  }
+
+  void _go(Widget screen) {
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => screen),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      backgroundColor: Color(0xFFAAC4A0),
+      body: Center(
+        child: SizedBox(
+          height: 420,
+          width: 420,
+          child: Image(
+            image: AssetImage('assets/custom_loader.gif'),
+            fit: BoxFit.contain,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class ProfileCache {
+  static const _key = "cached_profile";
+
+  static Future<void> saveProfile(Map<String, dynamic> data) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_key, jsonEncode(data));
+  }
+
+  static Future<Map<String, dynamic>?> getProfile() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_key);
+    if (raw == null) return null;
+    return jsonDecode(raw);
+  }
+
+  static Future<void> clear() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_key);
+  }
+}
+
 class AddEventPage extends StatefulWidget {
   const AddEventPage({super.key});
 
@@ -1554,6 +2500,10 @@ class _AddEventPageState extends State<AddEventPage> {
   final TextEditingController _contactController = TextEditingController();
   final TextEditingController _detailsController = TextEditingController();
   final TextEditingController _locationController = TextEditingController();
+  final TextEditingController _organizerNameController =
+      TextEditingController();
+  final TextEditingController _endDateTimeController = TextEditingController();
+
   String? _selectedPosterId;
   final Map<String, List<String>> sportPosters = {
     "football": [
@@ -1584,8 +2534,69 @@ class _AddEventPageState extends State<AddEventPage> {
       "badminton_4.png",
       "badminton_5.png",
     ],
+    "hockey": ["hockey_1.jpg"],
+    "table tennis": ["table_tennis_1.jpg"],
+    "volley ball": ["volley_ball_1.jpg"],
+    "tennis": ["tennis_1.jpg"],
     // Add remaining sports the same way
   };
+  DateTime? _parsePrettyDateTime(String raw) {
+    try {
+      raw = raw.trim();
+
+      // Expect format: "31 Dec 2025 , 4:00 PM"
+      final parts = raw.split(',');
+      if (parts.length != 2) return null;
+
+      final datePart = parts[0].trim(); // "31 Dec 2025"
+      final timePart = parts[1].trim().toUpperCase().replaceAll(" ", "");
+      // Cleanup → "4:00PM"
+
+      // Parse Date
+      final dateElements = datePart.split(RegExp(r"\s+")); // spaces may vary
+      if (dateElements.length != 3) return null;
+
+      final day = int.parse(dateElements[0]);
+      final monthName = dateElements[1];
+      final year = int.parse(dateElements[2]);
+
+      const months = {
+        "JAN": 1,
+        "FEB": 2,
+        "MAR": 3,
+        "APR": 4,
+        "MAY": 5,
+        "JUN": 6,
+        "JUL": 7,
+        "AUG": 8,
+        "SEP": 9,
+        "OCT": 10,
+        "NOV": 11,
+        "DEC": 12,
+      };
+
+      final month = months[monthName.toUpperCase()];
+      if (month == null) return null;
+
+      // Parse Time ("4:00PM")
+      final match = RegExp(r'^(\d{1,2}):(\d{2})(AM|PM)$').firstMatch(timePart);
+      if (match == null) return null;
+
+      int hour = int.parse(match.group(1)!);
+      int minute = int.parse(match.group(2)!);
+      String period = match.group(3)!;
+
+      // Convert PM → 24-hour
+      if (period == "PM" && hour < 12) hour += 12;
+      if (period == "AM" && hour == 12) hour = 0;
+
+      // Construct local time → Convert to UTC
+      return DateTime(year, month, day, hour, minute).toUtc();
+    } catch (e) {
+      print("Date Parse ERROR: $e");
+      return null;
+    }
+  }
 
   Widget glassButton(
     String text, {
@@ -1846,7 +2857,7 @@ class _AddEventPageState extends State<AddEventPage> {
                 decoration: InputDecoration(
                   filled: true,
                   fillColor: const Color(0xFFBFE3C0).withOpacity(0.3),
-                  labelText: "Date & Time (e.g. 12 Feb 2025 • 4:00 PM)",
+                  labelText: "Start Date (e.g. 12 Feb 2025 , 4:00 PM)",
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
                   ),
@@ -1861,6 +2872,31 @@ class _AddEventPageState extends State<AddEventPage> {
                   filled: true,
                   fillColor: const Color(0xFFBFE3C0).withOpacity(0.3),
                   labelText: "Organizer Contact",
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _organizerNameController,
+                decoration: InputDecoration(
+                  labelText: "Organizer Name",
+                  filled: true,
+                  fillColor: const Color(0xFFBFE3C0).withOpacity(0.3),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+
+              TextField(
+                controller: _endDateTimeController,
+                decoration: InputDecoration(
+                  labelText: "End Date (e.g. 12 Feb 2025 , 4:00 PM)",
+                  filled: true,
+                  fillColor: const Color(0xFFBFE3C0).withOpacity(0.3),
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
                   ),
@@ -1886,13 +2922,106 @@ class _AddEventPageState extends State<AddEventPage> {
               // -------- POST BUTTON (Same as Create Team Button) --------
               glassButton(
                 "Post Event",
-                color: const Color(0xFF2E7D32), // ✅ same dark green
+                color: const Color(0xFF2E7D32),
                 opacity: 0.3,
-                onTap: () {
-                  Navigator.pop(context);
+                onTap: () async {
+                  final title = _titleController.text.trim();
+                  final sportName = _sportController.text.trim();
+                  final location = _locationController.text.trim();
+                  final contact = _contactController.text.trim();
+                  final description = _detailsController.text.trim();
+                  final organizerName = _organizerNameController.text.trim();
+
+                  if (title.isEmpty ||
+                      sportName.isEmpty ||
+                      location.isEmpty ||
+                      contact.isEmpty ||
+                      description.isEmpty ||
+                      _selectedPosterId == null) {
+                    showGlassAlert(
+                      context,
+                      "Please fill all fields and select a poster.",
+                    );
+                    return;
+                  }
+
+                  final sportId = sportNameToIdLower[sportName.toLowerCase()];
+                  if (sportId == null) {
+                    showGlassAlert(
+                      context,
+                      "Invalid sport name. Use one of: ${sportNameToId.keys.join(", ")}",
+                    );
+                    return;
+                  }
+                  // Translate selected poster filename -> unique poster_id
+                  final posterId =
+                      posterAssetToId[_selectedPosterId!] ?? _selectedPosterId!;
+
+                  final startsAt = _parsePrettyDateTime(
+                    _dateTimeController.text.trim(),
+                  );
+                  final endsAt = _parsePrettyDateTime(
+                    _endDateTimeController.text.trim(),
+                  );
+
+                  if (startsAt == null || endsAt == null) {
+                    showGlassAlert(
+                      context,
+                      "Invalid date format. Example:\n12 Feb 2025 , 4:00 PM",
+                    );
+                    return;
+                  }
+
+                  final payload = {
+                    "title": title,
+                    "description": description,
+                    "organizer_name": organizerName,
+                    "organizer_contact": contact,
+                    "starts_at": startsAt.toIso8601String(),
+                    "ends_at": endsAt.toIso8601String(),
+                    "poster_id": posterId,
+                    "sport_id": sportId,
+                    "location_text": location,
+                  };
+
+                  print("EVENT CREATE PAYLOAD: $payload");
+
+                  try {
+                    final uri = Uri.parse(
+                      "https://turf-mgmt-sys.onrender.com/api/events/",
+                    );
+                    final res = await _authService.authPost(uri, payload);
+
+                    print(
+                      "EVENT CREATE STATUS: ${res.statusCode} - ${res.body}",
+                    );
+
+                    if (res.statusCode == 200 || res.statusCode == 201) {
+                      if (!context.mounted) return;
+                      showGlassAlert(context, "Event created successfully");
+                      Navigator.pop(context, true);
+                      return;
+                    }
+
+                    // ❌ Any error response becomes:
+                    if (!context.mounted) return;
+                    showGlassAlert(
+                      context,
+                      "You are not authorized to post an event",
+                    );
+                  } catch (e) {
+                    print("EVENT CREATE ERROR: $e");
+
+                    if (!context.mounted) return;
+                    showGlassAlert(
+                      context,
+                      "You are not authorized to post an event",
+                    );
+                    const SizedBox(height: 30);
+                  }
+                  ;
                 },
               ),
-              const SizedBox(height: 40),
             ],
           ),
         ),
@@ -1906,12 +3035,16 @@ class FrostedGlassCard extends StatefulWidget {
   final String title;
   final String location;
   final String? image;
+  final VoidCallback? onTap;
+  final DateTime endsAt;
 
   const FrostedGlassCard({
     super.key,
     required this.title,
     required this.location,
     this.image,
+    required this.endsAt,
+    this.onTap,
   });
 
   @override
@@ -1921,21 +3054,27 @@ class FrostedGlassCard extends StatefulWidget {
 class _FrostedGlassCardState extends State<FrostedGlassCard> {
   bool _isHovered = false;
 
+  String _getRemainingTime(DateTime endsAt) {
+    final now = DateTime.now();
+    final diff = endsAt.difference(now);
+
+    if (diff.isNegative) return "Ended";
+
+    if (diff.inDays >= 1) {
+      return "Ends in ${diff.inDays} day${diff.inDays > 1 ? 's' : ''}";
+    } else if (diff.inHours >= 1) {
+      return "Ends in ${diff.inHours} hour${diff.inHours > 1 ? 's' : ''}";
+    } else if (diff.inMinutes >= 1) {
+      return "Ends in ${diff.inMinutes} min";
+    } else {
+      return "Ending soon!";
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: () {
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => EventDetailsPage(
-              title: widget.title,
-              location: widget.location,
-              image: widget.image,
-            ),
-          ),
-        );
-      },
+      onTap: widget.onTap, // 👈 navigation handled by parent only
       child: MouseRegion(
         onEnter: (_) => setState(() => _isHovered = true),
         onExit: (_) => setState(() => _isHovered = false),
@@ -1971,7 +3110,7 @@ class _FrostedGlassCardState extends State<FrostedGlassCard> {
                           : Container(color: Colors.green.withOpacity(0.1)),
                     ),
 
-                    // Gradient overlay for readability
+                    // Gradient overlay for better text readability
                     Positioned.fill(
                       child: Container(
                         decoration: BoxDecoration(
@@ -1988,7 +3127,31 @@ class _FrostedGlassCardState extends State<FrostedGlassCard> {
                       ),
                     ),
 
-                    // Glass info pill
+                    // 🔥 Countdown badge (time remaining)
+                    Positioned(
+                      top: 12,
+                      right: 12,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.redAccent.withOpacity(0.85),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Text(
+                          _getRemainingTime(widget.endsAt),
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                    ),
+
+                    // Bottom Info (Glass pill)
                     Positioned(
                       bottom: 16,
                       left: 16,
@@ -2013,7 +3176,7 @@ class _FrostedGlassCardState extends State<FrostedGlassCard> {
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 Text(
-                                  widget.title, // ✅ always shows title
+                                  widget.title,
                                   textAlign: TextAlign.center,
                                   style: const TextStyle(
                                     fontSize: 16,
@@ -2068,8 +3231,7 @@ class FrostedIconCard extends StatelessWidget {
           Navigator.push(
             context,
             MaterialPageRoute(
-              builder: (context) =>
-                  TeamListPage(sportName: name, sportId: 'football123'),
+              builder: (context) => TeamListPage(sportName: name),
             ),
           );
           return;
@@ -2129,7 +3291,10 @@ class FrostedIconCard extends StatelessWidget {
 
           case 'Hockey':
             grounds = [
-              {'image': 'assets/hockey_ground1.png', 'title': 'Hockey Field 1'},
+              {
+                'image': 'assets/hockey_ground1.png',
+                'title': 'Hockey Ground 1',
+              },
             ];
             break;
 
@@ -2137,19 +3302,19 @@ class FrostedIconCard extends StatelessWidget {
             grounds = [
               {
                 'image': 'assets/table_tennis_ground1.png',
-                'title': 'Table Tennis Hall 1',
+                'title': 'Table Tennis Room 1',
               },
               {
                 'image': 'assets/table_tennis_ground2.png',
-                'title': 'Table Tennis Hall 2',
+                'title': 'Table Tennis Room 2',
               },
               {
                 'image': 'assets/table_tennis_ground3.png',
-                'title': 'Table Tennis Hall 3',
+                'title': 'Table Tennis Room 3',
               },
               {
                 'image': 'assets/table_tennis_ground4.png',
-                'title': 'Table Tennis Hall 4',
+                'title': 'Table Tennis Room 4',
               },
             ];
             break;
@@ -2243,7 +3408,7 @@ class GroundSelectionPage extends StatelessWidget {
             children: [
               // Top bar
               Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                mainAxisAlignment: MainAxisAlignment.start,
                 children: [
                   IconButton(
                     icon: const Icon(
@@ -2252,6 +3417,7 @@ class GroundSelectionPage extends StatelessWidget {
                     ),
                     onPressed: () => Navigator.pop(context),
                   ),
+                  const SizedBox(width: 12),
                   const Text(
                     'Select Football Ground',
                     style: TextStyle(
@@ -2260,9 +3426,9 @@ class GroundSelectionPage extends StatelessWidget {
                       color: Colors.black87,
                     ),
                   ),
-                  const Icon(Icons.menu_rounded, color: Colors.black54),
                 ],
               ),
+
               const SizedBox(height: 20),
 
               Expanded(
@@ -2449,7 +3615,7 @@ class BasketballGroundSelectionPage extends StatelessWidget {
             children: [
               // Top bar
               Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                mainAxisAlignment: MainAxisAlignment.start,
                 children: [
                   IconButton(
                     icon: const Icon(
@@ -2458,6 +3624,7 @@ class BasketballGroundSelectionPage extends StatelessWidget {
                     ),
                     onPressed: () => Navigator.pop(context),
                   ),
+                  const SizedBox(width: 12),
                   const Text(
                     'Select Basketball Ground',
                     style: TextStyle(
@@ -2466,9 +3633,9 @@ class BasketballGroundSelectionPage extends StatelessWidget {
                       color: Colors.black87,
                     ),
                   ),
-                  const Icon(Icons.menu_rounded, color: Colors.black54),
                 ],
               ),
+
               const SizedBox(height: 20),
 
               Expanded(
@@ -2626,6 +3793,57 @@ final Map<String, Map<String, List<String>>> groundSlotRules = {
       '9:00 PM - 9:30 PM',
     ],
   },
+  'Table Tennis': {
+    'Table Tennis Room 1': [
+      '4:00 PM - 4:30 PM',
+      '4:30 PM - 5:00 PM',
+      '5:00 PM - 5:30 PM',
+      '5:30 PM - 6:00 PM',
+      '6:00 PM - 6:30 PM',
+      '6:30 PM - 7:00 PM',
+      '7:00 PM - 7:30 PM',
+      '7:30 PM - 8:00 PM',
+    ],
+    'Table Tennis Room 2': [
+      '4:00 PM - 4:30 PM',
+      '4:30 PM - 5:00 PM',
+      '5:00 PM - 5:30 PM',
+      '5:30 PM - 6:00 PM',
+    ],
+    'Table Tennis Room 3': [
+      '6:00 PM - 6:30 PM',
+      '6:30 PM - 7:00 PM',
+      '7:00 PM - 7:30 PM',
+      '7:30 PM - 8:00 PM',
+    ],
+    'Table Tennis Room 4': [
+      '5:30 PM - 6:00 PM',
+      '6:00 PM - 6:30 PM',
+      '6:30 PM - 7:00 PM',
+      '7:00 PM - 7:30 PM',
+    ],
+  },
+
+  'Volleyball': {
+    'Volleyball Court 1': [
+      '6:00 PM - 6:30 PM',
+      '6:30 PM - 7:00 PM',
+      '7:00 PM - 7:30 PM',
+      '7:30 PM - 8:00 PM',
+      '8:00 PM - 8:30 PM',
+    ],
+  },
+
+  'Hockey': {
+    'Hockey Ground 1': [
+      '4:00 PM - 4:30 PM',
+      '4:30 PM - 5:00 PM',
+      '5:00 PM - 5:30 PM',
+      '5:30 PM - 6:00 PM',
+      '6:00 PM - 6:30 PM',
+      '6:30 PM - 7:00 PM',
+    ],
+  },
 };
 final Map<String, int> slotNameToId = slotIdMap.map(
   (key, value) => MapEntry(value, key),
@@ -2703,12 +3921,17 @@ class _SlotBookingPageState extends State<SlotBookingPage> {
   }
 
   Future<void> _fetchBookedSlots() async {
+    setState(() => _loadingSlots = true);
     final prefs = await SharedPreferences.getInstance();
     final token = prefs.getString("access_token");
     if (token == null) return;
 
     final groundId = groundNameToId[widget.groundName]; // reverse lookup
     final date = widget.slotDate; // already YYYY-MM-DD
+    print("DEBUG - sport: ${widget.sportName}");
+    print("DEBUG - groundName: '${widget.groundName}'");
+    print("DEBUG - groundId lookup: ${groundNameToId[widget.groundName]}");
+    print("ALL groundNameToId KEYS: ${groundNameToId.keys.toList()}");
 
     final response = await _authService.authGet(
       Uri.parse(
@@ -2994,68 +4217,86 @@ class _SlotBookingPageState extends State<SlotBookingPage> {
 
             // --- Slot grid (Glass effect) ---
             Expanded(
-              child: GridView.builder(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 20,
-                  vertical: 10,
-                ),
-                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 2,
-                  crossAxisSpacing: 14,
-                  mainAxisSpacing: 14,
-                  childAspectRatio: 2.7,
-                ),
-                itemCount: _slots.length,
-                itemBuilder: (context, index) {
-                  final time = _slots[index];
-                  final isSelected = _selectedSlots.contains(time);
-                  final isBooked = _bookedSlots.contains(time);
+              child: _loadingSlots
+                  ? Center(
+                      child: SizedBox(
+                        width: 220,
+                        height: 220,
+                        child: Image.asset(
+                          "assets/custom_loader.gif",
+                          fit: BoxFit.contain,
+                        ),
+                      ),
+                    )
+                  : GridView.builder(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 20,
+                        vertical: 10,
+                      ),
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 2,
+                            crossAxisSpacing: 14,
+                            mainAxisSpacing: 14,
+                            childAspectRatio: 2.7,
+                          ),
+                      itemCount: _slots.length,
+                      itemBuilder: (context, index) {
+                        final time = _slots[index];
+                        final isSelected = _selectedSlots.contains(time);
+                        final isBooked = _bookedSlots.contains(time);
 
-                  return GestureDetector(
-                    onTap: isBooked ? null : () => _toggleSlot(time),
-                    child: Opacity(
-                      opacity: isBooked ? 0.45 : 1.0,
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(14),
-                        child: BackdropFilter(
-                          filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 250),
-                            alignment: Alignment.center,
-                            decoration: BoxDecoration(
-                              color: isBooked
-                                  ? Colors.red.shade900.withOpacity(0.22)
-                                  : isSelected
-                                  ? Colors.green.shade800.withOpacity(0.65)
-                                  : Colors.green.withOpacity(0.12),
+                        return GestureDetector(
+                          onTap: isBooked ? null : () => _toggleSlot(time),
+                          child: Opacity(
+                            opacity: isBooked ? 0.45 : 1.0,
+                            child: ClipRRect(
                               borderRadius: BorderRadius.circular(14),
-                              border: Border.all(
-                                color: isBooked
-                                    ? Colors.red.shade900.withOpacity(0.35)
-                                    : Colors.white.withOpacity(0.3),
-                              ),
-                            ),
-                            child: Text(
-                              time,
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: isBooked
-                                    ? Colors.red.shade900
-                                    : isSelected
-                                    ? Colors.white
-                                    : Colors.black87,
-
-                                fontSize: 14,
-                                fontWeight: FontWeight.w600,
+                              child: BackdropFilter(
+                                filter: ImageFilter.blur(
+                                  sigmaX: 15,
+                                  sigmaY: 15,
+                                ),
+                                child: AnimatedContainer(
+                                  duration: const Duration(milliseconds: 250),
+                                  alignment: Alignment.center,
+                                  decoration: BoxDecoration(
+                                    color: isBooked
+                                        ? Colors.red.shade900.withOpacity(0.22)
+                                        : isSelected
+                                        ? Colors.green.shade800.withOpacity(
+                                            0.65,
+                                          )
+                                        : Colors.green.withOpacity(0.12),
+                                    borderRadius: BorderRadius.circular(14),
+                                    border: Border.all(
+                                      color: isBooked
+                                          ? Colors.red.shade900.withOpacity(
+                                              0.35,
+                                            )
+                                          : Colors.white.withOpacity(0.3),
+                                    ),
+                                  ),
+                                  child: Text(
+                                    time,
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      color: isBooked
+                                          ? Colors.red.shade900
+                                          : isSelected
+                                          ? Colors.white
+                                          : Colors.black87,
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                      ),
+                        );
+                      },
                     ),
-                  );
-                },
-              ),
             ),
             // --- Book Slot Button (Glass look) ---
             Padding(
@@ -3403,7 +4644,7 @@ class GroundSelectionPageCommon extends StatelessWidget {
             children: [
               // --- Top Bar ---
               Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                mainAxisAlignment: MainAxisAlignment.start,
                 children: [
                   IconButton(
                     icon: const Icon(
@@ -3412,17 +4653,22 @@ class GroundSelectionPageCommon extends StatelessWidget {
                     ),
                     onPressed: () => Navigator.pop(context),
                   ),
-                  Text(
-                    'Select $sportName Ground',
-                    style: const TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.black87,
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      'Select $sportName Ground',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black87,
+                      ),
                     ),
                   ),
-                  const Icon(Icons.menu_rounded, color: Colors.black54),
+                  const SizedBox(width: 40), // to balance the back button space
                 ],
               ),
+
               const SizedBox(height: 20),
 
               // --- Grounds List ---
@@ -3462,56 +4708,52 @@ class _NotificationPageState extends State<NotificationPage> {
   void initState() {
     super.initState();
     _loadAndMarkRead();
-
-    // Live updates from FCM: pull fresh list each time
     FirebaseMessaging.onMessage.listen((_) => _loadAndRecount());
     FirebaseMessaging.onMessageOpenedApp.listen((_) => _loadAndRecount());
   }
 
   Future<void> _loadAndMarkRead() async {
     await _loadAndRecount();
-    await markAllNotificationsRead(); // <-- mark on open
-    setState(() {}); // refresh to clear badges
+    await markAllNotificationsRead();
+    setState(() {});
   }
 
   Future<void> _loadAndRecount() async {
     final list = await fetchNotificationsFromBackend();
-    if (mounted) {
-      globalNotifications = list;
-      globalUnreadCount = list.where((n) => !(n['is_read'] ?? false)).length;
-      setState(() {});
-    }
+    if (!mounted) return;
+    globalNotifications = list;
+    globalUnreadCount = list.where((n) => !(n['is_read'] ?? false)).length;
+    setState(() {});
   }
 
-  // --- Call your backend best-effort ---
+  // ⭐ ADDED — CLEAR ALL NOTIFICATIONS ⭐
+  void _clearAllNotifications() {
+    setState(() {
+      globalNotifications.clear();
+      globalUnreadCount = 0;
+    });
+  }
+
   Future<void> markAllNotificationsRead() async {
     final prefs = await SharedPreferences.getInstance();
     final jwt = prefs.getString('access_token');
     if (jwt == null) return;
 
-    // Adjust this URL if your backend exposes a different path
-    final resp = await http.post(
+    await http.post(
       Uri.parse(
         'https://turf-mgmt-sys.onrender.com/api/notifications/mark-all-read/',
       ),
       headers: {'Authorization': 'Bearer $jwt'},
     );
 
-    if (resp.statusCode == 200) {
-      // Update local state instantly
-      for (final n in globalNotifications) {
-        n['is_read'] = true;
-      }
-      globalUnreadCount = 0;
-    } else {
-      // If your backend doesn't have the endpoint, nothing breaks.
-      // You can optionally iterate and mark individually if you do have a per-ID endpoint.
+    for (final n in globalNotifications) {
+      n['is_read'] = true;
     }
+    globalUnreadCount = 0;
   }
 
   @override
   Widget build(BuildContext context) {
-    // No full-screen loader anymore; keep scaffold so bottom nav never disappears
     final notifications = globalNotifications.isNotEmpty
         ? globalNotifications
         : [
@@ -3528,7 +4770,7 @@ class _NotificationPageState extends State<NotificationPage> {
       extendBody: true,
       body: SafeArea(
         child: RefreshIndicator(
-          onRefresh: _loadAndRecount, // pull to refresh
+          onRefresh: _loadAndRecount,
           child: ListView(
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
             children: [
@@ -3539,16 +4781,72 @@ class _NotificationPageState extends State<NotificationPage> {
                   style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
                 ),
               ),
+
+              // ⭐ Swipable notifications
               for (final item in notifications)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 12.0),
-                  child: _NotificationTile(item: item),
+                Dismissible(
+                  key: Key(item.hashCode.toString()),
+                  direction: DismissDirection.endToStart,
+                  background: Container(
+                    alignment: Alignment.centerRight,
+                    padding: const EdgeInsets.only(right: 20),
+                    decoration: BoxDecoration(
+                      color: Colors.green.withOpacity(0.5),
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: const Icon(Icons.delete, color: Colors.white),
+                  ),
+                  onDismissed: (_) {
+                    setState(() {
+                      globalNotifications.remove(item);
+                      globalUnreadCount = globalNotifications
+                          .where((n) => !(n['is_read'] ?? false))
+                          .length;
+                    });
+                  },
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: 12.0),
+                    child: _NotificationTile(item: item),
+                  ),
                 ),
+
+              const SizedBox(height: 20),
+
+              // ⭐ CLEAR ALL BUTTON — bottom right alignment
+              if (globalNotifications.isNotEmpty)
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: GestureDetector(
+                    onTap: _clearAllNotifications,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 22,
+                        vertical: 12,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.green.withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(22),
+                        border: Border.all(
+                          color: Colors.green.shade700.withOpacity(0.4),
+                        ),
+                      ),
+                      child: const Text(
+                        "Clear All",
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 15,
+                          color: Colors.green,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              const SizedBox(height: 20),
             ],
           ),
         ),
       ),
-      bottomNavigationBar: const PersistentNavBar(), // always visible
+      bottomNavigationBar: const PersistentNavBar(),
     );
   }
 }
@@ -3564,6 +4862,25 @@ class _NotificationTile extends StatelessWidget {
     final time = (item['time'] ?? '') as String;
     final isRead = (item['is_read'] ?? false) as bool;
 
+    // ⭐ If it's the placeholder "No Notifications" message → show plain centered text ⭐
+    if (title == "No Notifications") {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 50),
+        child: Center(
+          child: Text(
+            "No Notifications Yet",
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 26,
+              color: Colors.black.withOpacity(0.6),
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+      );
+    }
+
+    // ⭐ Normal Notification Tile ⭐
     return ClipRRect(
       borderRadius: BorderRadius.circular(16),
       child: BackdropFilter(
@@ -3616,19 +4933,23 @@ class _NotificationTile extends StatelessWidget {
                       style: const TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.w600,
+                        color: Colors.black87,
                       ),
                     ),
                     const SizedBox(height: 4),
                     Text(
                       body,
-                      style: TextStyle(color: Colors.black.withOpacity(0.7)),
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.black.withOpacity(0.75),
+                      ),
                     ),
                     const SizedBox(height: 6),
                     Text(
                       time,
                       style: TextStyle(
                         fontSize: 12,
-                        color: Colors.black.withOpacity(0.5),
+                        color: Colors.black.withOpacity(0.45),
                       ),
                     ),
                   ],
@@ -3643,13 +4964,14 @@ class _NotificationTile extends StatelessWidget {
 }
 
 // ================== 🔗 BACKEND CONFIG ==================
-const String BASE_URL = "https://your.api"; // ← change me
+const String BASE_URL = "https://turf-mgmt-sys.onrender.com";
 
-// Endpoints (adjust to your backend)
-const String TRANSLATE_SPORT_PATH = "/sports/translate"; // GET ?name=
-const String TEAMS_BY_SPORT_PATH = "/sports/{id}/teams"; // GET
-const String TEAM_DETAILS_PATH = "/teams/{id}"; // GET
+// Endpoints
+const String TEAMS_LIST_PATH = "/api/teams/"; // GET all, POST create
+const String TEAMS_BY_SPORT_PATH = "/api/teams/by-sport/"; // GET ?sport_id=
+const String TEAM_DETAILS_PATH = "/api/teams/{id}/"; // GET /api/teams/3/
 
+// ================== 🧱 DATA MODELS ==================
 // ================== 🧱 DATA MODELS ==================
 class TeamSummary {
   final String id;
@@ -3663,6 +4985,20 @@ class TeamSummary {
   );
 }
 
+class TeamMember {
+  final int userId;
+  final String name;
+  final String role;
+
+  TeamMember({required this.userId, required this.name, required this.role});
+
+  factory TeamMember.fromJson(Map<String, dynamic> j) => TeamMember(
+    userId: j['user_id'] ?? 0,
+    name: j['name'] ?? '',
+    role: j['role'] ?? '',
+  );
+}
+
 class TeamDetails {
   final int teamId;
   final String teamName;
@@ -3672,6 +5008,7 @@ class TeamDetails {
   final int memberCount;
   final DateTime createdAt;
   final List<TeamAchievement> achievements;
+  final List<TeamMember> members;
 
   TeamDetails({
     required this.teamId,
@@ -3682,22 +5019,31 @@ class TeamDetails {
     required this.memberCount,
     required this.createdAt,
     required this.achievements,
+    required this.members,
   });
 
-  factory TeamDetails.fromJson(Map<String, dynamic> j) => TeamDetails(
-    teamId: j['team_id'] ?? 0,
-    teamName: j['team_name'] ?? '',
-    captainName: j['captain_name'] ?? '',
-    sportName: j['sport_name'] ?? '',
-    sportId: j['sport_id'] ?? 0,
-    memberCount: j['member_count'] ?? 0,
-    createdAt:
-        DateTime.tryParse(j['created_at'] ?? '') ??
-        DateTime.fromMillisecondsSinceEpoch(0),
-    achievements: (j['achievements'] as List<dynamic>? ?? [])
-        .map((x) => TeamAchievement.fromJson(x as Map<String, dynamic>))
-        .toList(),
-  );
+  factory TeamDetails.fromJson(Map<String, dynamic> j) {
+    final captain = j['captain'] as Map<String, dynamic>?;
+    final sport = j['sport'] as Map<String, dynamic>?;
+
+    return TeamDetails(
+      teamId: j['team_id'] ?? 0,
+      teamName: j['team_name'] ?? '',
+      captainName: captain?['name'] ?? '',
+      sportName: sport?['sport_name'] ?? '',
+      sportId: sport?['sport_id'] ?? 0,
+      memberCount: j['member_count'] ?? 0,
+      createdAt:
+          DateTime.tryParse(j['created_at'] ?? '') ??
+          DateTime.fromMillisecondsSinceEpoch(0),
+      achievements: (j['achievements'] as List<dynamic>? ?? [])
+          .map((x) => TeamAchievement.fromJson(x as Map<String, dynamic>))
+          .toList(),
+      members: (j['members'] as List<dynamic>? ?? [])
+          .map((x) => TeamMember.fromJson(x as Map<String, dynamic>))
+          .toList(),
+    );
+  }
 }
 
 class TeamAchievement {
@@ -3717,17 +5063,6 @@ class TeamAchievement {
     date: j['date'] != null ? DateTime.tryParse(j['date'].toString()) : null,
   );
 }
-
-const Map<String, int> sportNameToId = {
-  "Football": 1,
-  "Basketball": 2,
-  "Cricket": 3,
-  "Tennis": 4,
-  "Badminton": 5,
-  "Volleyball": 6,
-  "Hockey": 7,
-  "Table Tennis": 8,
-};
 
 // ================== 🔐 API CLIENT ==================
 class ApiClient {
@@ -3755,10 +5090,12 @@ class ApiClient {
   }) async {
     String resolved = path;
     pathParams?.forEach((k, v) => resolved = resolved.replaceAll("{$k}", v));
+
     final res = await http.get(
       _buildUri(resolved, query),
       headers: await _headers(),
     );
+
     if (res.statusCode >= 200 && res.statusCode < 300) {
       if (res.body.isEmpty) return {};
       final data = jsonDecode(res.body);
@@ -3766,44 +5103,148 @@ class ApiClient {
     }
     throw Exception("GET $resolved failed: ${res.statusCode} ${res.body}");
   }
+
+  Future<Map<String, dynamic>> postJson(
+    String path, {
+    Map<String, dynamic>? body,
+    Map<String, String>? pathParams,
+  }) async {
+    String resolved = path;
+    pathParams?.forEach((k, v) => resolved = resolved.replaceAll("{$k}", v));
+
+    final res = await http.post(
+      _buildUri(resolved),
+      headers: await _headers(),
+      body: jsonEncode(body ?? {}),
+    );
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      if (res.body.isEmpty) return {};
+      final data = jsonDecode(res.body);
+      return data is Map<String, dynamic> ? data : {"data": data};
+    }
+
+    throw Exception("POST $resolved failed: ${res.statusCode} ${res.body}");
+  }
 }
 
 // ================== 📦 REPOSITORY ==================
 class TeamsRepository {
   final _api = ApiClient.instance;
 
-  /// 1) Translate sport name to backend sport_id (unique translation table)
-  Future<String> translateSportNameToId(String sportName) async {
-    // Example: GET /sports/translate?name=Tennis  -> { "sport_id": 3, "sport_name": "Tennis" }
-    final j = await _api.getJson(
-      TRANSLATE_SPORT_PATH,
-      query: {"name": sportName},
-    );
-    final id = j["sport_id"] ?? j["id"];
-    if (id == null) throw Exception("sport_id not found for $sportName");
-    return id.toString();
-  }
-
-  /// 2) Teams for a sport (sorted by backend)
+  /// 1) Teams for a sport (backend: GET /api/teams/by-sport/?sport_id=ID)
   Future<List<TeamSummary>> fetchTeamsBySport(String sportId) async {
-    // Example: GET /sports/{id}/teams -> [ {team_id, team_name}, ... ]
     final j = await _api.getJson(
       TEAMS_BY_SPORT_PATH,
-      pathParams: {"id": sportId},
+      query: {"sport_id": sportId},
     );
-    final list = (j["data"] as List<dynamic>?) ?? (j as List<dynamic>?) ?? [];
+
+    final list = (j["data"] as List<dynamic>? ?? []);
     return list
         .map((e) => TeamSummary.fromJson(e as Map<String, dynamic>))
         .toList();
   }
 
-  /// 3) Team details
+  /// 2) Team details (backend: GET /api/teams/{id}/)
   Future<TeamDetails> fetchTeamDetails(String teamId) async {
-    // Example: GET /teams/{id} -> (your provided JSON)
     final j = await _api.getJson(TEAM_DETAILS_PATH, pathParams: {"id": teamId});
-    // If your API wraps in {data: {...}}
+    // /api/teams/{id}/ returns a plain object
     final data = (j["data"] as Map<String, dynamic>?) ?? j;
     return TeamDetails.fromJson(data);
+  }
+
+  /// 3) Create team (backend: POST /api/teams/)
+  Future<TeamDetails> createTeam(Map<String, dynamic> payload) async {
+    final j = await _api.postJson(TEAMS_LIST_PATH, body: payload);
+    final data = (j["data"] as Map<String, dynamic>?) ?? j;
+    return TeamDetails.fromJson(data);
+  }
+
+  // ================= 🔥 New API Calls for Invitations =================
+  Future<void> sendMatchInvite({
+    required int senderTeamId,
+    required int targetTeamId,
+    required String preferredDate,
+    required int groundId,
+    String? message,
+  }) async {
+    final body = {
+      "sender_team_id": senderTeamId,
+      "target_team_id": targetTeamId,
+      "preferred_date": preferredDate,
+      "ground_id": groundId,
+    };
+
+    if (message != null && message.isNotEmpty) {
+      body["message"] = message;
+    }
+
+    print("📤 Sending Invite Request: $body");
+
+    final res = await _api.postJson(
+      "/api/teams/invitations/match-invite/",
+      body: body,
+    );
+
+    print("📬 Invite Sent Response: $res");
+  }
+
+  Future<List<dynamic>> fetchSentInvites() async {
+    print("📡 Fetching SENT invitations...");
+    print("📌 API: /api/teams/invitations/sent/");
+
+    final res = await _api.getJson("/api/teams/invitations/sent/");
+
+    print("📬 SENT API Response:");
+    print(res);
+
+    final list = (res["invitations"] as List<dynamic>? ?? []);
+    print("📊 Total SENT invitations loaded: ${list.length}");
+
+    return res["invitations"] ?? [];
+  }
+
+  Future<List<dynamic>> fetchReceivedInvites() async {
+    print("📡 Fetching RECEIVED invitations...");
+    print("📌 API: /api/teams/invitations/received/");
+
+    final res = await _api.getJson("/api/teams/invitations/received/");
+
+    print("📬 RECEIVED API Response:");
+    print(res);
+
+    final list = (res["invitations"] as List<dynamic>? ?? []);
+    print("📊 Total RECEIVED invitations loaded: ${list.length}");
+
+    return res["invitations"] ?? [];
+  }
+
+  Future<List<Map<String, dynamic>>> fetchCaptainTeams(int sportId) async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString("access_token");
+
+    final uri = Uri.parse(
+      "https://turf-mgmt-sys.onrender.com/api/teams/captain/?sport_id=$sportId",
+    );
+
+    print("📡 FETCHING CAPTAIN TEAMS for sport_id=$sportId");
+
+    final res = await http.get(
+      uri,
+      headers: {
+        "Authorization": "Bearer $token",
+        "Content-Type": "application/json",
+      },
+    );
+
+    print("CAPTAIN TEAM STATUS: ${res.statusCode}");
+    print("BODY: ${res.body}");
+
+    if (res.statusCode == 200) {
+      final data = jsonDecode(res.body);
+      if (data is List) return List<Map<String, dynamic>>.from(data);
+    }
+    return [];
   }
 }
 
@@ -3830,21 +5271,60 @@ class TeamsPage extends StatelessWidget {
     return Scaffold(
       backgroundColor: const Color(0xFFE8F5E9),
       extendBody: true,
+
+      // 🆕 AppBar Added Here
+      appBar: AppBar(
+        backgroundColor: const Color(0xFFE8F5E9),
+        elevation: 0,
+        title: const Text(
+          "Teams List",
+          style: TextStyle(
+            fontSize: 22,
+            fontWeight: FontWeight.bold,
+            color: Colors.black87,
+          ),
+        ),
+        actions: [
+          GestureDetector(
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const TeamInviteHistoryPage(),
+                ),
+              );
+            },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: const [
+                  Icon(Icons.history_rounded, color: Colors.green, size: 22),
+                  SizedBox(width: 4),
+                  Text(
+                    "Invitation History",
+                    style: TextStyle(
+                      color: Colors.green,
+                      fontWeight: FontWeight.w600,
+                      decoration: TextDecoration.underline,
+                      fontSize: 15,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
-                "Teams List",
-                style: TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.black87,
-                ),
-              ),
-              const SizedBox(height: 20),
+              const SizedBox(height: 10),
+
               Expanded(
                 child: GridView.count(
                   crossAxisCount: 2,
@@ -3856,25 +5336,20 @@ class TeamsPage extends StatelessWidget {
                     final name = sport.keys.first;
                     final image = sport.values.first;
                     return GestureDetector(
-                      onTap: () async {
-                        try {
-                          // 🔹 Send sport name to backend to get canonical sport_id
-                          final sportId = await teamsRepo
-                              .translateSportNameToId(name);
-                          // Next screen uses this sportId to fetch team list
-                          // ignore: use_build_context_synchronously
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => TeamListPage(
-                                sportName: name,
-                                sportId: sportId,
-                              ),
-                            ),
-                          );
-                        } catch (e) {
-                          showGlassAlert(context, "Failed to load sport: $e");
+                      onTap: () {
+                        final int? id = sportNameToId[name.trim()];
+                        if (id == null) {
+                          print("❌ No id mapping for: $name");
+                          showGlassAlert(context, "Invalid sport selected");
+                          return;
                         }
+
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => TeamListPage(sportName: name),
+                          ),
+                        );
                       },
                       child: FrostedIconCard(
                         name: name,
@@ -3889,7 +5364,280 @@ class TeamsPage extends StatelessWidget {
           ),
         ),
       ),
+
       bottomNavigationBar: const PersistentNavBar(),
+    );
+  }
+}
+
+final Map<String, List<int>> sportGrounds = {
+  "Football": [1],
+  "Cricket": [2, 3],
+  "Hockey": [4],
+  "Basketball": [5, 6],
+  "Badminton": [7, 8, 9, 10],
+  "Tennis": [11, 12],
+  "Table Tennis": [13, 14, 15, 16],
+  "Volleyball": [17],
+};
+
+class TeamInviteHistoryPage extends StatefulWidget {
+  const TeamInviteHistoryPage({super.key});
+
+  @override
+  State<TeamInviteHistoryPage> createState() => _TeamInviteHistoryPageState();
+}
+
+class _TeamInviteHistoryPageState extends State<TeamInviteHistoryPage> {
+  bool showSent = true;
+
+  Future<List<dynamic>> _load() {
+    return showSent
+        ? teamsRepo.fetchSentInvites()
+        : teamsRepo.fetchReceivedInvites();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFE8F5E9),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFFE8F5E9),
+        elevation: 0,
+        title: const Text(
+          "Team Invite History",
+          style: TextStyle(color: Colors.black87),
+        ),
+        leading: IconButton(
+          icon: const Icon(
+            Icons.arrow_back_ios_new_rounded,
+            color: Colors.black87,
+          ),
+          onPressed: () => Navigator.pop(context),
+        ),
+      ),
+      body: Column(
+        children: [
+          const SizedBox(height: 12),
+
+          // Toggle Buttons
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              _tab("Sent", showSent, () {
+                setState(() => showSent = true);
+              }),
+              const SizedBox(width: 10),
+              _tab("Received", !showSent, () {
+                setState(() => showSent = false);
+              }),
+            ],
+          ),
+
+          const SizedBox(height: 12),
+
+          Expanded(
+            child: FutureBuilder<List<dynamic>>(
+              future: _load(),
+              builder: (ctx, snap) {
+                if (snap.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                if (snap.hasError) {
+                  return Center(
+                    child: Text(
+                      "Error: ${snap.error}",
+                      style: const TextStyle(color: Colors.red),
+                    ),
+                  );
+                }
+
+                final invites = snap.data ?? [];
+                if (invites.isEmpty) {
+                  return const Center(
+                    child: Text(
+                      "No invitations found",
+                      style: TextStyle(color: Colors.black87),
+                    ),
+                  );
+                }
+                return ListView.builder(
+                  itemCount: invites.length,
+                  itemBuilder: (_, i) {
+                    final inv = invites[i];
+
+                    // Map response data
+                    final teamName = inv["team_name"] ?? "Unknown Team";
+                    final sport = inv["sport_name"] ?? "Unknown Sport";
+                    final status =
+                        inv["status_display"] ?? inv["status"] ?? "-";
+                    final created = (inv["created_at"] ?? "")
+                        .toString()
+                        .split("T")
+                        .first;
+
+                    final matchDetails = inv["match_details"] ?? {};
+                    final message = matchDetails["message"] ?? "";
+
+                    final senderName = inv["sender_name"] ?? "";
+                    final senderEmail = inv["sender_email"] ?? "";
+                    final recipientName = inv["recipient_name"] ?? "";
+                    final recipientEmail = inv["recipient_email"] ?? "";
+
+                    final preferredDate = matchDetails["preferred_date"] ?? "";
+                    final groundId = matchDetails["ground_id"];
+                    final groundName = groundId != null
+                        ? groundIdMap[groundId] ?? ""
+                        : "";
+
+                    final isSent = showSent;
+
+                    print("📌 Invite: $teamName | $sport | $status");
+                    print(
+                      "🗓️ Date: $preferredDate | GroundId: $groundId → $groundName",
+                    );
+
+                    return Container(
+                      margin: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.green.withOpacity(0.10),
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(
+                          color: Colors.white.withOpacity(0.3),
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.05),
+                            blurRadius: 5,
+                            offset: const Offset(0, 3),
+                          ),
+                        ],
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // Team + Status Row
+                          Row(
+                            children: [
+                              const Icon(Icons.groups, color: Colors.green),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  "$teamName ($sport)",
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 16,
+                                    color: Colors.black87,
+                                  ),
+                                ),
+                              ),
+                              Text(
+                                status.toUpperCase(),
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 14,
+                                  color: status == "ACCEPTED"
+                                      ? Colors.green.shade700
+                                      : status == "DECLINED"
+                                      ? Colors.red.shade700
+                                      : Colors.orange.shade700,
+                                ),
+                              ),
+                            ],
+                          ),
+
+                          const SizedBox(height: 10),
+
+                          Row(
+                            children: [
+                              const Icon(
+                                Icons.calendar_today_rounded,
+                                size: 18,
+                                color: Colors.green,
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                "Created: $created",
+                                style: const TextStyle(fontSize: 14),
+                              ),
+                            ],
+                          ),
+
+                          const SizedBox(height: 10),
+
+                          if (message.trim().isNotEmpty) ...[
+                            Text(
+                              "“$message”",
+                              style: const TextStyle(
+                                fontSize: 14,
+                                fontStyle: FontStyle.italic,
+                                color: Colors.black87,
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                          ],
+
+                          Text(
+                            isSent
+                                ? "Sent To: $recipientName\nEmail: $recipientEmail"
+                                : "Sent By: $senderName\nEmail: $senderEmail",
+                            style: const TextStyle(fontSize: 14),
+                          ),
+
+                          const SizedBox(height: 6),
+
+                          // 🆕 Show match date
+                          if (preferredDate.isNotEmpty)
+                            Text(
+                              "Match Date: $preferredDate",
+                              style: const TextStyle(fontSize: 14),
+                            ),
+
+                          // 🆕 Show translated ground name
+                          if (groundName.isNotEmpty)
+                            Text(
+                              "Ground: $groundName",
+                              style: const TextStyle(fontSize: 14),
+                            ),
+
+                          const SizedBox(height: 10),
+                        ],
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _tab(String label, bool active, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
+        decoration: BoxDecoration(
+          color: active
+              ? Colors.green.shade700.withOpacity(0.4)
+              : Colors.green.withOpacity(0.15),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.white.withOpacity(0.3)),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+            color: active ? Colors.black : Colors.black87,
+          ),
+        ),
+      ),
     );
   }
 }
@@ -3897,15 +5645,13 @@ class TeamsPage extends StatelessWidget {
 // ================== 🆕 TEAM LIST PAGE (UI LOOK KEPT) ==================
 class TeamListPage extends StatelessWidget {
   final String sportName;
-  final String sportId;
 
-  const TeamListPage({
-    super.key,
-    required this.sportName,
-    required this.sportId,
-  });
-
-  Future<List<TeamSummary>> _fetch() => teamsRepo.fetchTeamsBySport(sportId);
+  const TeamListPage({super.key, required this.sportName});
+  Future<List<TeamSummary>> _fetch() {
+    final int? sportId = sportNameToId[sportName.trim()];
+    if (sportId == null) return Future.value([]);
+    return teamsRepo.fetchTeamsBySport(sportId.toString());
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -3938,8 +5684,7 @@ class TeamListPage extends StatelessWidget {
               Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) =>
-                      AddTeamPage(sportName: sportName, sportId: sportId),
+                  builder: (_) => AddTeamPage(sportName: sportName),
                 ),
               );
             },
@@ -4048,7 +5793,8 @@ class TeamListPage extends StatelessWidget {
 }
 
 // ================== 🆕 TEAM DETAILS PAGE (UI KEPT, DATA FROM BACKEND) ==================
-class TeamDetailsPage extends StatelessWidget {
+// ================== 🆕 UPDATED TEAM DETAILS PAGE ==================
+class TeamDetailsPage extends StatefulWidget {
   final String teamId;
   final String teamName;
   final String sportName;
@@ -4060,7 +5806,248 @@ class TeamDetailsPage extends StatelessWidget {
     required this.sportName,
   });
 
-  Future<TeamDetails> _fetch() => teamsRepo.fetchTeamDetails(teamId);
+  @override
+  State<TeamDetailsPage> createState() => _TeamDetailsPageState();
+}
+
+class _TeamDetailsPageState extends State<TeamDetailsPage> {
+  List<Map<String, dynamic>> captainTeams = [];
+  bool _isInviting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadCaptainTeams();
+  }
+
+  Future<void> _loadCaptainTeams() async {
+    final sportId = sportNameToId[widget.sportName.trim()] ?? -1;
+
+    print(
+      "🎯 Fetching captain teams for sport: ${widget.sportName}, id=$sportId",
+    );
+
+    try {
+      final result = await teamsRepo.fetchCaptainTeams(sportId);
+      print("📌 Captain Teams Loaded: $result");
+
+      if (!mounted) return;
+      setState(() {
+        captainTeams = result;
+      });
+    } catch (e) {
+      print("❌ Error loading captain teams: $e");
+      // leave captainTeams empty → invite button disabled
+    }
+  }
+
+  Future<TeamDetails> _fetch() {
+    return teamsRepo.fetchTeamDetails(widget.teamId);
+  }
+
+  String _fmtYMD(DateTime d) =>
+      "${d.day.toString().padLeft(2, '0')} ${_mon(d.month)} ${d.year}";
+
+  String _mon(int m) {
+    const mm = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    return (m >= 1 && m <= 12) ? mm[m - 1] : '';
+  }
+
+  void _showInviteDialog(BuildContext context, int targetTeamId) {
+    // Option A: button is disabled when captainTeams.isEmpty
+    if (captainTeams.isEmpty) return;
+
+    int? selectedSenderTeamId = captainTeams.first["team_id"];
+    String? selectedDate;
+    TextEditingController msgCtrl = TextEditingController();
+    int? selectedGroundId;
+
+    final List<String> dateOptions = List.generate(30, (i) {
+      final d = DateTime.now().add(Duration(days: i));
+      return "${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}";
+    });
+
+    final String sport = widget.sportName.trim();
+    final List<int> allowedGrounds = sportGrounds[sport] ?? [];
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFFE8F5E9),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+      builder: (_) {
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            return Padding(
+              padding: EdgeInsets.only(
+                left: 20,
+                right: 20,
+                bottom: MediaQuery.of(ctx).viewInsets.bottom + 20,
+                top: 20,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      "Match Invite Details",
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 15),
+
+                    // 🆕 Sender Team Dropdown
+                    DropdownButtonFormField<int>(
+                      decoration: const InputDecoration(
+                        labelText: "Select Your Team (Sender)",
+                        border: OutlineInputBorder(),
+                      ),
+                      value: selectedSenderTeamId,
+                      items: captainTeams.map((t) {
+                        return DropdownMenuItem(
+                          value: t["team_id"] as int,
+                          child: Text(
+                            "${t["team_name"]} (ID: ${t["team_id"]})",
+                          ),
+                        );
+                      }).toList(),
+                      onChanged: (v) =>
+                          setSheetState(() => selectedSenderTeamId = v),
+                    ),
+                    const SizedBox(height: 15),
+
+                    // Preferred Date
+                    DropdownButtonFormField<String>(
+                      decoration: const InputDecoration(
+                        labelText: "Preferred Match Date",
+                        border: OutlineInputBorder(),
+                      ),
+                      value: selectedDate,
+                      items: dateOptions
+                          .map(
+                            (d) => DropdownMenuItem(value: d, child: Text(d)),
+                          )
+                          .toList(),
+                      onChanged: (v) => setSheetState(() => selectedDate = v),
+                    ),
+                    const SizedBox(height: 15),
+
+                    // Ground Dropdown
+                    DropdownButtonFormField<int>(
+                      decoration: const InputDecoration(
+                        labelText: "Select Ground",
+                        border: OutlineInputBorder(),
+                      ),
+                      value: selectedGroundId,
+                      items: allowedGrounds
+                          .map(
+                            (g) => DropdownMenuItem(
+                              value: g,
+                              child: Text(groundIdMap[g] ?? "Ground $g"),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (v) =>
+                          setSheetState(() => selectedGroundId = v),
+                    ),
+                    const SizedBox(height: 15),
+
+                    // Message
+                    TextField(
+                      controller: msgCtrl,
+                      maxLines: 3,
+                      decoration: const InputDecoration(
+                        labelText: "Message (Optional)",
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 25),
+
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green.shade700.withOpacity(0.5),
+                        foregroundColor: Colors.black,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        minimumSize: const Size(double.infinity, 48),
+                      ),
+                      onPressed: () async {
+                        if (selectedSenderTeamId == null ||
+                            selectedDate == null ||
+                            selectedGroundId == null) {
+                          showGlassAlert(ctx, "Fill all required fields");
+                          return;
+                        }
+
+                        Navigator.pop(ctx);
+
+                        setState(
+                          () => _isInviting = true,
+                        ); // ⏳ Start Loading UI
+
+                        print("============== Invite Request ==============");
+                        print("Sender Team ID: $selectedSenderTeamId");
+                        print("Target Team ID: $targetTeamId");
+                        print("Preferred Date: $selectedDate");
+                        print("Ground ID: $selectedGroundId");
+                        print("Message: ${msgCtrl.text}");
+                        print("============================================");
+
+                        try {
+                          await teamsRepo.sendMatchInvite(
+                            senderTeamId: selectedSenderTeamId!,
+                            targetTeamId: targetTeamId,
+                            preferredDate: selectedDate!,
+                            groundId: selectedGroundId!,
+                            message: msgCtrl.text.trim().isEmpty
+                                ? null
+                                : msgCtrl.text.trim(),
+                          );
+
+                          if (!mounted) return;
+                          showGlassAlert(
+                            context,
+                            "Invitation Sent Successfully!",
+                          );
+                        } catch (e) {
+                          print("❌ Invite Error: $e");
+                          if (!mounted) return;
+                          showGlassAlert(context, "Failed to send invite");
+                        }
+
+                        if (!mounted) return;
+                        setState(() => _isInviting = false); // 🛑 Stop loading
+                      },
+                      child: const Text("Invite Team"),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
 
   Widget _buildTile(String title, String value, IconData icon) {
     return Container(
@@ -4111,27 +6098,6 @@ class TeamDetailsPage extends StatelessWidget {
     );
   }
 
-  String _fmtYMD(DateTime d) =>
-      "${d.day.toString().padLeft(2, '0')} ${_mon(d.month)} ${d.year}";
-
-  String _mon(int m) {
-    const mm = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec',
-    ];
-    return (m >= 1 && m <= 12) ? mm[m - 1] : '';
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -4153,44 +6119,62 @@ class TeamDetailsPage extends StatelessWidget {
           onPressed: () => Navigator.pop(context),
         ),
         title: Text(
-          teamName,
+          widget.teamName,
           style: const TextStyle(
             fontWeight: FontWeight.bold,
             color: Colors.black87,
           ),
         ),
       ),
-
       body: FutureBuilder<TeamDetails>(
         future: _fetch(),
         builder: (context, snap) {
           if (snap.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
           }
+
           if (snap.hasError) {
+            print("❌ ERROR loading team details: ${snap.error}");
             return Padding(
               padding: const EdgeInsets.all(20),
               child: Center(
                 child: Text(
-                  "Failed to load team details\n${snap.error}",
+                  "Failed to load team details.\nPlease try again later.",
                   textAlign: TextAlign.center,
                   style: const TextStyle(color: Colors.black87),
                 ),
               ),
             );
           }
+
+          if (!snap.hasData) {
+            return const Center(
+              child: Text(
+                "No data available.",
+                style: TextStyle(color: Colors.black87),
+              ),
+            );
+          }
+
           final data = snap.data!;
+
+          final achievementsStrings = data.achievements.map((a) {
+            final dateStr = a.date != null ? " (${_fmtYMD(a.date!)})" : "";
+            return "🏆 ${a.title}${dateStr} — ${a.description}";
+          }).toList();
+
+          // ✅ Use the sport name passed from UI (your choice A)
+          final String sportName = widget.sportName.trim().isEmpty
+              ? "Unknown"
+              : widget.sportName.trim();
+
           final membersCount = data.memberCount.toString();
           final leader = data.captainName.isEmpty ? "-" : data.captainName;
           final created = data.createdAt.millisecondsSinceEpoch == 0
               ? "-"
               : _fmtYMD(data.createdAt);
 
-          // Convert achievements to list of strings like your mock UI
-          final achievementsStrings = data.achievements.map((a) {
-            final dateStr = a.date != null ? " (${_fmtYMD(a.date!)})" : "";
-            return "🏆 ${a.title}${dateStr} — ${a.description}";
-          }).toList();
+          print("📌 LOADED: sport_id=${data.sportId} → sport=$sportName");
 
           return SingleChildScrollView(
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 25),
@@ -4210,7 +6194,7 @@ class TeamDetailsPage extends StatelessWidget {
                 ),
                 _buildTile("Team Leader", leader, Icons.person_rounded),
 
-                // Members List (if you later add members endpoint, bind it here)
+                // Members List
                 Container(
                   margin: const EdgeInsets.symmetric(vertical: 8),
                   padding: const EdgeInsets.all(15),
@@ -4228,11 +6212,9 @@ class TeamDetailsPage extends StatelessWidget {
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
-                    children: const [
-                      // Label only (as your current UI shows static list)
-                      // Hook real members here when backend provides them
+                    children: [
                       Row(
-                        children: [
+                        children: const [
                           Icon(Icons.groups, color: Colors.green),
                           SizedBox(width: 10),
                           Text(
@@ -4245,13 +6227,46 @@ class TeamDetailsPage extends StatelessWidget {
                           ),
                         ],
                       ),
-                      SizedBox(height: 10),
-                      // You can add dynamic bullets if/when backend returns members
+                      const SizedBox(height: 10),
+                      if (data.members.isEmpty)
+                        const Text(
+                          "• No members yet",
+                          style: TextStyle(fontSize: 15, color: Colors.black87),
+                        )
+                      else
+                        ...data.members.map(
+                          (m) => Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 6),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  m.role == "captain"
+                                      ? Icons.star_rounded
+                                      : Icons.person_outline_rounded,
+                                  color: m.role == "captain"
+                                      ? Colors.orange
+                                      : Colors.green,
+                                  size: 22,
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Text(
+                                    "${m.name} — ${m.role}",
+                                    style: const TextStyle(
+                                      fontSize: 15,
+                                      color: Colors.black87,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
                     ],
                   ),
                 ),
 
-                // Achievements Tile
+                // Achievements
                 Container(
                   margin: const EdgeInsets.symmetric(vertical: 8),
                   padding: const EdgeInsets.all(15),
@@ -4310,33 +6325,27 @@ class TeamDetailsPage extends StatelessWidget {
         },
       ),
 
+      // 🆕 New Invite Button UI + Captain check (Option A)
       bottomNavigationBar: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(80),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-            child: GestureDetector(
-              onTap: () {
-                showGlassAlert(context, "Team Invited Successfully!");
-                return;
-              },
-              child: Container(
-                height: 52,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: const Color(0xFF2E7D32).withOpacity(0.45),
-                  borderRadius: BorderRadius.circular(80),
-                  border: Border.all(color: Colors.green.withOpacity(0.4)),
-                ),
-                child: const Text(
-                  "Invite Team",
-                  style: TextStyle(
-                    color: Colors.black87,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 16,
-                  ),
-                ),
+        padding: const EdgeInsets.all(14),
+        child: GestureDetector(
+          onTap: captainTeams.isEmpty
+              ? null
+              : () => _showInviteDialog(context, int.parse(widget.teamId)),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(50),
+            child: Container(
+              height: 55,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: captainTeams.isEmpty
+                    ? Colors.grey.withOpacity(0.5)
+                    : const Color(0xFF2E7D32).withOpacity(0.5),
+                borderRadius: BorderRadius.circular(50),
+              ),
+              child: const Text(
+                "Invite Team",
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
               ),
             ),
           ),
@@ -4360,15 +6369,9 @@ class AppGreen {
 /// ------------------------------------
 class AddTeamPage extends StatefulWidget {
   final String sportName;
-  final String sportId; // ✅ we now accept backend sport_id
   final Map<String, dynamic>? existingTeam;
 
-  const AddTeamPage({
-    super.key,
-    required this.sportName,
-    required this.sportId,
-    this.existingTeam,
-  });
+  const AddTeamPage({super.key, required this.sportName, this.existingTeam});
 
   @override
   State<AddTeamPage> createState() => _AddTeamPageState();
@@ -4433,25 +6436,27 @@ class _AddTeamPageState extends State<AddTeamPage> {
 
   void _submitTeam() async {
     final teamName = _teamNameController.text.trim();
-    final leader = _leaderNameController.text.trim();
-    if (teamName.isEmpty) {
-      showGlassAlert(context, "Enter Team Name");
-      return;
-    }
+    if (teamName.isEmpty) return showGlassAlert(context, "Enter Team Name");
 
     final emails = _playerEmails
-        .map((c) => c.text.trim())
+        .map((e) => e.text.trim())
         .where((e) => e.isNotEmpty)
         .toList();
-    if (emails.length < _getMinPlayers(widget.sportName)) {
-      showGlassAlert(
-        context,
-        "At least ${_getMinPlayers(widget.sportName)} player emails required.",
-      );
+
+    final minPlayers = _getMinPlayers(widget.sportName);
+    if (emails.length < minPlayers) {
+      showGlassAlert(context, "At least $minPlayers players required.");
       return;
     }
 
-    final achievements = _achievements
+    final int? sportId = sportNameToId[widget.sportName.trim()];
+    if (sportId == null) {
+      print("❌ No sport id for ${widget.sportName}");
+      showGlassAlert(context, "Invalid sport");
+      return;
+    }
+
+    List<Map<String, String>> achievementsList = _achievements
         .map(
           (a) => {
             "title": a["title"]!.text.trim(),
@@ -4464,18 +6469,21 @@ class _AddTeamPageState extends State<AddTeamPage> {
 
     final payload = {
       "team_name": teamName,
-      "sport_id": int.parse(widget.sportId),
+      "sport_id": sportId,
       "member_emails": emails,
-      "achievements": achievements,
+      "achievements": achievementsList,
     };
 
-    print("SEND TO BACKEND: $payload");
+    print("📤 Sending Payload: $payload");
 
-    // TODO: call your backend POST /api/teams/ now
-    // await ApiClient.instance.postJson("/api/teams/", body: payload);
-
-    Navigator.pop(context);
-    showGlassAlert(context, "Team Created Successfully!");
+    try {
+      final created = await teamsRepo.createTeam(payload);
+      showGlassAlert(context, "Team '${created.teamName}' created!");
+      Navigator.pop(context);
+    } catch (e) {
+      print("❌ Backend Error: $e");
+      showGlassAlert(context, "Failed: $e");
+    }
   }
 
   @override
@@ -4642,7 +6650,6 @@ class _AddTeamPageState extends State<AddTeamPage> {
     filled: true,
     fillColor: AppGreen.light.withOpacity(0.3),
     labelText: label,
-    labelStyle: const TextStyle(color: AppGreen.ink),
     border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
   );
 
@@ -4694,11 +6701,31 @@ class _ProfilePageState extends State<ProfilePage> {
 
   List<Map<String, dynamic>> achievements = [];
   List<Map<String, dynamic>> teamsList = [];
+  String? selectedAvatar = "avatar_1.png"; // default
 
   @override
   void initState() {
     super.initState();
+    _loadCachedProfile();
     _fetchProfile(); // ✅ Fetch profile when page loads
+  }
+
+  Future<void> _loadCachedProfile() async {
+    final cached = await ProfileCache.getProfile();
+    if (cached != null && mounted) {
+      setState(() {
+        name = cached["name"];
+        email = cached["email"];
+        phone = cached["phone"];
+        sports = cached["sports"];
+        selectedAvatar =
+            cached["avatar"] ?? cached["selectedAvatar"] ?? "avatar_1.png";
+        achievements = List<Map<String, dynamic>>.from(
+          cached["achievements"] ?? [],
+        );
+        teamsList = List<Map<String, dynamic>>.from(cached["teams"] ?? []);
+      });
+    }
   }
 
   Future<void> _fetchProfile() async {
@@ -4706,20 +6733,77 @@ class _ProfilePageState extends State<ProfilePage> {
       Uri.parse("https://turf-mgmt-sys.onrender.com/api/profile/me/"),
     );
 
-    if (res.statusCode == 200) {
-      final data = jsonDecode(res.body);
-      setState(() {
-        name = data["name"];
-        email = data["email"];
-        phone = data["phone"];
-        sports = data["sports"];
+    if (res.statusCode != 200) return;
 
-        achievements = List<Map<String, dynamic>>.from(
-          data["achievements"] ?? [],
-        );
-        teamsList = List<Map<String, dynamic>>.from(data["teams"] ?? []);
+    final raw = jsonDecode(res.body);
+    final profile = raw["profile"];
+
+    print("===== RAW PROFILE JSON =====");
+    const JsonEncoder encoder = JsonEncoder.withIndent("  ");
+    print(encoder.convert(profile));
+    print("===== END OF PROFILE JSON =====");
+    final teams = profile["teams"] ?? [];
+    for (var i = 0; i < teams.length; i++) {
+      final t = teams[i];
+      print("--- TEAM $i ---");
+      print("team_id: ${t['team_id']}");
+      print("teamId: ${t['teamId']}");
+      print("team_name: ${t['team_name']}");
+      print("sport_name: ${t['sport_name']}");
+      print("sport: ${t['sport']}");
+      print("is_captain: ${t['is_captain']}");
+      print(t);
+    }
+    print("===============");
+
+    // ----------- GROUP ACHIEVEMENTS BY SPORT ----------
+    Map<String, List<Map<String, dynamic>>> grouped = {};
+    for (var a in profile["achievements"] ?? []) {
+      final sport = a["sport"] ?? "Unknown Sport";
+      grouped[sport] ??= [];
+      grouped[sport]!.add({
+        "tournament": a["title"] ?? "",
+        "year": a["year"]?.toString() ?? "",
+        "achievement": a["achievement"] ?? "",
+        "experience": a["experience"]?.toString() ?? "",
       });
     }
+
+    achievements = grouped.entries
+        .map((e) => {"sport": e.key, "records": e.value})
+        .toList();
+
+    // ----------- FIX TEAMS DATA  -----------
+    // ----------- TEAMS DATA (NO FRONTEND FILTERING) -----------
+    final rawTeams = (profile["teams"] ?? []) as List;
+
+    teamsList = rawTeams.map<Map<String, dynamic>>((t) {
+      return {
+        "teamId": t["team_id"] ?? 0,
+        "teamName": t["team_name"] ?? "",
+        "sport": t["sport_name"] ?? "Unknown Sport",
+        "leader": t["captain_name"] ?? "",
+        "createdOn": t["created_on"] ?? "",
+        "isLeader": (t["is_captain"] ?? 0) == 1,
+        "is_captain": t["is_captain"] ?? 0, // keep raw value too
+        "members": List<Map<String, dynamic>>.from(t["members"] ?? []),
+      };
+    }).toList();
+
+    // ----------- BASIC FIELDS -----------
+    selectedAvatar = profile["avatar_id"] ?? "avatar_1.png";
+    name = profile["name"];
+    email = profile["email"];
+    phone = profile["phone"];
+
+    sports = (profile["interested_sports"] ?? [])
+        .map((s) => s["sport_name"])
+        .join(", ");
+
+    // ----------- CACHE LATEST DATA -----------
+    await ProfileCache.saveProfile(profile);
+
+    setState(() {});
   }
 
   Future<void> _logout() async {
@@ -4748,130 +6832,140 @@ class _ProfilePageState extends State<ProfilePage> {
     );
   }
 
+  bool get _isProfileLoaded =>
+      name != "John Doe" &&
+      email != "john.doe@gmail.com" &&
+      email.isNotEmpty &&
+      name.isNotEmpty;
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFFF1FAF1),
       body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 25),
-          child: Column(
-            children: [
-              const Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  "Profile",
-                  style: TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.bold,
-                    color: AppGreen.ink,
-                  ),
+        child: !_isProfileLoaded
+            ? const Center(child: CircularProgressIndicator())
+            : SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 25,
                 ),
-              ),
-              const SizedBox(height: 25),
-
-              Stack(
-                alignment: Alignment.center,
-                children: [
-                  const CircleAvatar(
-                    radius: 70,
-                    backgroundColor: Color(0xFFD4E7D0),
-                    backgroundImage: AssetImage('assets/profile_pic.png'),
-                  ),
-                  Positioned(
-                    bottom: 5,
-                    right: 8,
-                    child: InkWell(
-                      onTap: () {},
-                      child: Container(
-                        decoration: const BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: Colors.white,
-                        ),
-                        padding: const EdgeInsets.all(5),
-                        child: const Icon(
-                          Icons.edit,
+                child: Column(
+                  children: [
+                    const Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        "Profile",
+                        style: TextStyle(
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold,
                           color: AppGreen.ink,
-                          size: 18,
                         ),
                       ),
                     ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 25),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        GestureDetector(
+                          onTap: () async {
+                            // Go to Edit Profile page
+                            await Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => EditProfilePage(
+                                  name: name,
+                                  email: email,
+                                  phone: phone,
+                                  sports: sports,
+                                  achievements: achievements,
+                                  teamsList: teamsList,
+                                  selectedAvatar:
+                                      selectedAvatar, // pass current avatar
+                                ),
+                              ),
+                            );
 
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    name,
-                    style: const TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.black,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  IconButton(
-                    icon: const Icon(
-                      Icons.edit,
-                      color: Colors.black54,
-                      size: 20,
-                    ),
-                    onPressed: () async {
-                      final result = await Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => EditProfilePage(
-                            name: name,
-                            email: email,
-                            phone: phone,
-                            sports: sports,
-                            achievements: achievements,
-                            teamsList: teamsList,
+                            // 🔁 After returning, always pull latest profile from backend
+                            await _fetchProfile();
+                          },
+
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(18),
+                              color: Colors.green.shade600.withOpacity(0.1),
+                              border: Border.all(
+                                color: Colors.green.shade700.withOpacity(0.4),
+                              ),
+                            ),
+                            child: const Row(
+                              children: [
+                                Icon(
+                                  Icons.edit,
+                                  size: 18,
+                                  color: AppGreen.deep,
+                                ),
+                                SizedBox(width: 6),
+                                Text(
+                                  "Edit Profile",
+                                  style: TextStyle(
+                                    color: AppGreen.deep,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
-                      );
+                      ],
+                    ),
+                    const SizedBox(height: 20),
 
-                      if (result != null && result is Map<String, dynamic>) {
-                        setState(() {
-                          name = result['name'];
-                          email = result['email'];
-                          phone = result['phone'];
-                          sports = result['sports'];
-                          achievements = List<Map<String, dynamic>>.from(
-                            result['achievements'],
-                          );
-                          teamsList = List<Map<String, dynamic>>.from(
-                            result['teamsList'],
-                          );
-                        });
-                      }
-                    },
-                  ),
-                ],
+                    // Profile Avatar (NO CONST!)
+                    CircleAvatar(
+                      radius: 70,
+                      backgroundColor: const Color(0xFFD4E7D0),
+                      backgroundImage: AssetImage(
+                        'assets/profile_avatars/${selectedAvatar ?? "avatar_1.png"}',
+                      ),
+                    ),
+                    const SizedBox(height: 25),
+
+                    Text(
+                      name,
+                      style: const TextStyle(
+                        fontSize: 27,
+                        fontWeight: FontWeight.w700,
+                        color: AppGreen.ink,
+                      ),
+                    ),
+                    const SizedBox(height: 25),
+
+                    _buildInfoTile("Email", email, Icons.email),
+                    _buildInfoTile("Mobile", phone, Icons.phone),
+                    _buildInfoTile(
+                      "Interested Sports",
+                      sports,
+                      Icons.sports_soccer,
+                    ),
+
+                    _buildAchievementsCard(),
+                    _buildTeamsSection(),
+
+                    const SizedBox(height: 30),
+
+                    glassActionButton(
+                      context: context,
+                      label: "Sign Out",
+                      onTap: () => _logout(),
+                    ),
+                    const SizedBox(height: 60),
+                  ],
+                ),
               ),
-              const SizedBox(height: 20),
-
-              _buildInfoTile("Email", email, Icons.email),
-              _buildInfoTile("Mobile", phone, Icons.phone),
-              _buildInfoTile("Interested Sports", sports, Icons.sports_soccer),
-
-              _buildAchievementsCard(),
-              _buildTeamsSection(),
-
-              const SizedBox(height: 30),
-
-              glassActionButton(
-                context: context,
-                label: "Sign Out",
-                onTap: () => _logout(),
-              ),
-              const SizedBox(height: 60),
-            ],
-          ),
-        ),
       ),
       bottomNavigationBar: const PersistentNavBar(),
     );
@@ -5054,6 +7148,526 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 }
 
+class EditTeamPage extends StatefulWidget {
+  final int teamId;
+  final String sportName;
+
+  const EditTeamPage({
+    super.key,
+    required this.teamId,
+    required this.sportName,
+  });
+
+  @override
+  State<EditTeamPage> createState() => _EditTeamPageState();
+}
+
+class _EditTeamPageState extends State<EditTeamPage> {
+  final TextEditingController _teamNameController = TextEditingController();
+  final TextEditingController _leaderNameController = TextEditingController();
+
+  bool _isLeader = true; // ✅ You only reach here as captain from Profile
+
+  List<TextEditingController> _memberEmails = [];
+  List<Map<String, TextEditingController>> _achievements = [];
+
+  bool _loading = true;
+  List<Map<String, dynamic>> _members = [];
+  String _captainEmail = "";
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchTeam(); // ✅ single source of truth
+  }
+
+  Future<void> _fetchTeam() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString("access_token");
+      if (token == null) {
+        showGlassAlert(context, "Not logged in");
+        return;
+      }
+
+      final url = Uri.parse("$BASE_URL/api/teams/${widget.teamId}/");
+      final res = await http.get(
+        url,
+        headers: {"Authorization": "Bearer $token"},
+      );
+
+      if (res.statusCode != 200) {
+        showGlassAlert(context, "Failed to load team details");
+        setState(() => _loading = false);
+        return;
+      }
+
+      final data = jsonDecode(res.body);
+
+      // ✅ Basic info
+      _teamNameController.text = data["team_name"] ?? "";
+      _leaderNameController.text = data["captain"]?["name"] ?? "";
+      _captainEmail = data["captain"]?["email"] ?? "";
+
+      // ✅ Members from backend: expect user_id, name, email, role
+      _members = List<Map<String, dynamic>>.from(data["members"] ?? []);
+
+      // You’re opening as captain anyway, but keep this for safety
+      _isLeader = true;
+
+      // ✅ Prefill member emails (exclude captain)
+      _memberEmails = _members
+          .where((m) => m["role"] != "captain")
+          .map((m) => TextEditingController(text: m["email"] ?? ""))
+          .toList();
+
+      // 🔥 FIXED – Prefill Achievements for both formats
+      _achievements.clear();
+
+      final ach = data["achievements"];
+
+      if (ach is List) {
+        // Normal backend format (list of objects)
+        for (var a in ach) {
+          _achievements.add({
+            "title": TextEditingController(text: a["title"] ?? ""),
+            "description": TextEditingController(text: a["description"] ?? ""),
+            "date": TextEditingController(
+              text: (a["date"]?.toString().split("T").first) ?? "",
+            ),
+          });
+        }
+      } else if (ach is String && ach.trim().isNotEmpty) {
+        // New backend format: comma-separated string
+        for (var item in ach.split(",")) {
+          final trimmed = item.trim();
+          if (trimmed.isNotEmpty) {
+            _achievements.add({
+              "title": TextEditingController(text: trimmed),
+              "description": TextEditingController(text: ""),
+              "date": TextEditingController(text: ""),
+            });
+          }
+        }
+      }
+
+      // If nothing parsed → ensure at least one field shows
+      if (_achievements.isEmpty) _addAchievement();
+    } catch (e) {
+      print("❌ Team load failed: $e");
+      showGlassAlert(context, "Failed to load team details!");
+    }
+
+    setState(() => _loading = false);
+  }
+
+  void _addEmail() {
+    setState(() => _memberEmails.add(TextEditingController()));
+  }
+
+  void _addAchievement() {
+    setState(() {
+      _achievements.add({
+        "title": TextEditingController(),
+        "description": TextEditingController(),
+        "date": TextEditingController(),
+      });
+    });
+  }
+
+  Future<void> _updateTeamDetails() async {
+    // ✅ Convert controllers → plain list of emails
+    final emails = _memberEmails
+        .map((c) => c.text.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+
+    if (emails.isEmpty) {
+      showGlassAlert(context, "Team must have at least 1 member!");
+      return;
+    }
+
+    final achievementsPayload = _achievements
+        .where((a) => a["title"]!.text.trim().isNotEmpty)
+        .map(
+          (a) => {
+            "title": a["title"]!.text.trim(),
+            "description": a["description"]!.text.trim(),
+            "date": a["date"]!.text.trim(),
+          },
+        )
+        .toList();
+
+    final payload = {
+      "member_emails": emails,
+      "achievements": achievementsPayload,
+    };
+
+    try {
+      final res = await _authService.authPost(
+        Uri.parse("$BASE_URL/api/teams/${widget.teamId}/bulk-update/"),
+        payload,
+      );
+
+      if (res.statusCode == 200) {
+        showGlassAlert(context, "Team Updated Successfully!");
+
+        await Future.delayed(const Duration(milliseconds: 600));
+
+        Navigator.pushAndRemoveUntil(
+          context,
+          MaterialPageRoute(builder: (_) => const ProfilePage()),
+          (route) => false,
+        );
+      } else {
+        print("❌ Bulk update failed: ${res.statusCode} ${res.body}");
+        showGlassAlert(context, "Failed to update team");
+      }
+    } catch (e) {
+      print("❌ Bulk update error: $e");
+      showGlassAlert(context, "Network error while updating team");
+    }
+  }
+
+  Future<void> _transferCaptain(int newCaptainUserId) async {
+    final payload = {"new_captain_user_id": newCaptainUserId};
+
+    final res = await _authService.authPost(
+      Uri.parse("$BASE_URL/api/teams/${widget.teamId}/transfer-captain/"),
+      payload,
+    );
+
+    if (res.statusCode == 200) {
+      showGlassAlert(context, "Captain Transferred Successfully!");
+
+      await Future.delayed(const Duration(milliseconds: 600));
+
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(builder: (_) => const ProfilePage()),
+        (route) => false,
+      );
+    } else {
+      showGlassAlert(context, "Failed to transfer captain");
+    }
+  }
+
+  void _showTransferCaptainModal() {
+    int? _selectedUserId;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            return SafeArea(
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 18,
+                  vertical: 14,
+                ),
+                height:
+                    MediaQuery.of(context).size.height *
+                    0.55, // Responsive height
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Drag handle
+                    Center(
+                      child: Container(
+                        width: 45,
+                        height: 6,
+                        margin: const EdgeInsets.only(bottom: 12),
+                        decoration: BoxDecoration(
+                          color: Colors.black26,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                      ),
+                    ),
+
+                    const Center(
+                      child: Text(
+                        "Select New Captain",
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 18,
+                          color: Colors.black87,
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(height: 12),
+
+                    Expanded(
+                      child: SingleChildScrollView(
+                        child: Column(
+                          children: _members
+                              .where((m) => m["role"] != "captain")
+                              .map((m) {
+                                final int id = m["user_id"] ?? 0;
+                                return Card(
+                                  elevation: 1,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: RadioListTile<int>(
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    title: Text(
+                                      m["name"] ?? "Unknown",
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                    subtitle: Text(m["email"] ?? ""),
+                                    value: id,
+                                    groupValue: _selectedUserId,
+                                    activeColor: Colors.green,
+                                    onChanged: (value) => setModalState(
+                                      () => _selectedUserId = value,
+                                    ),
+                                  ),
+                                );
+                              })
+                              .toList(),
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(height: 8),
+
+                    // Action button
+                    _glassButton("Transfer Captaincy", () async {
+                      if (_selectedUserId == null) {
+                        showGlassAlert(context, "Select a member first!");
+                        return;
+                      }
+
+                      Navigator.pop(context); // Close sheet
+
+                      await Future.delayed(const Duration(milliseconds: 250));
+
+                      await _transferCaptain(_selectedUserId!);
+                    }, color: Colors.blue),
+
+                    const SizedBox(height: 10),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _glassButton(
+    String text,
+    VoidCallback tap, {
+    Color color = Colors.green,
+    double opacity = 0.25,
+  }) {
+    return GestureDetector(
+      onTap: tap,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(18),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+          child: Container(
+            height: 48,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: color.withOpacity(opacity),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: Colors.white.withOpacity(0.4)),
+            ),
+            child: Text(
+              text,
+              style: const TextStyle(
+                fontWeight: FontWeight.w600,
+                color: Colors.black87,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return const Scaffold(
+        backgroundColor: Color(0xFFDDEEE1),
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    return Scaffold(
+      backgroundColor: const Color(0xFFDDEEE1),
+      appBar: AppBar(
+        title: const Text("Edit Team", style: TextStyle(color: Colors.black87)),
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        iconTheme: const IconThemeData(color: Colors.black87),
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Team Name (Locked)
+            TextField(
+              controller: _teamNameController,
+              enabled: false,
+              decoration: _input("Team Name (Locked)"),
+            ),
+            const SizedBox(height: 12),
+
+            // Captain Name (Locked)
+            TextField(
+              controller: _leaderNameController,
+              enabled: false,
+              decoration: _input("Captain (Locked)"),
+            ),
+
+            const SizedBox(height: 20),
+            const Text(
+              "Team Members",
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+            ),
+            const SizedBox(height: 10),
+
+            // ✅ Member Emails (editable, prefilled)
+            ..._memberEmails.asMap().entries.map((entry) {
+              final index = entry.key;
+              final controller = entry.value;
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: controller,
+                        decoration: _input("Email ${index + 1}"),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(
+                        Icons.remove_circle_outline,
+                        color: Colors.red,
+                      ),
+                      onPressed: () =>
+                          setState(() => _memberEmails.removeAt(index)),
+                    ),
+                  ],
+                ),
+              );
+            }),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                onPressed: _addEmail,
+                icon: const Icon(Icons.add),
+                label: const Text("Add Member"),
+              ),
+            ),
+
+            const SizedBox(height: 25),
+            const Text(
+              "Achievements",
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+            ),
+            const SizedBox(height: 10),
+
+            // Achievements (editable)
+            ..._achievements.asMap().entries.map((entry) {
+              final index = entry.key;
+              final a = entry.value;
+              return Container(
+                padding: const EdgeInsets.all(12),
+                margin: const EdgeInsets.only(bottom: 12),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(.15),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  children: [
+                    TextField(
+                      controller: a["title"],
+                      decoration: _input("Title"),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: a["description"],
+                      decoration: _input("Description"),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: a["date"],
+                      decoration: _input("Date YYYY-MM-DD"),
+                    ),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: IconButton(
+                        icon: const Icon(
+                          Icons.remove_circle,
+                          color: Colors.red,
+                        ),
+                        onPressed: () =>
+                            setState(() => _achievements.removeAt(index)),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                onPressed: _addAchievement,
+                icon: const Icon(Icons.add),
+                label: const Text("Add Achievement"),
+              ),
+            ),
+
+            const SizedBox(height: 28),
+
+            // ✅ Save button (bulk update)
+            _glassButton(
+              "Save Changes",
+              _updateTeamDetails,
+              color: Colors.green,
+            ),
+            const SizedBox(height: 15),
+
+            // ✅ Transfer captaincy button (only for leader)
+            if (_isLeader)
+              _glassButton(
+                "Transfer Captaincy",
+                _showTransferCaptainModal,
+                color: Colors.blue,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  InputDecoration _input(String label) => InputDecoration(
+    labelText: label,
+    filled: true,
+    fillColor: Colors.white.withOpacity(0.25),
+    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+  );
+}
+
 /// ------------------------------------
 /// EDIT PROFILE PAGE
 /// ------------------------------------
@@ -5064,6 +7678,7 @@ class EditProfilePage extends StatefulWidget {
   final String sports;
   final List<Map<String, dynamic>> achievements; // grouped by sport
   final List<Map<String, dynamic>> teamsList;
+  final String? selectedAvatar;
 
   const EditProfilePage({
     super.key,
@@ -5073,6 +7688,7 @@ class EditProfilePage extends StatefulWidget {
     required this.sports,
     required this.achievements,
     required this.teamsList,
+    this.selectedAvatar,
   });
 
   @override
@@ -5096,6 +7712,41 @@ class _EditProfilePageState extends State<EditProfilePage> {
   late List<Map<String, dynamic>> teamsList;
   late List<Map<String, dynamic>>
   achievements; // [{sport:String, records: [ {...}, {...} ]}]
+  late String? _selectedAvatar;
+  bool _isSaving = false;
+  final List<String> avatarImages = [
+    "avatar_1.png",
+    "avatar_2.png",
+    "avatar_3.png",
+    "avatar_4.png",
+    "avatar_5.png",
+    "avatar_6.png",
+    "avatar_7.png",
+    "avatar_8.png",
+    "avatar_9.png",
+    "avatar_10.png",
+    "avatar_11.png",
+    "avatar_12.png",
+  ];
+  void _showSavingDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => Center(
+        child: Container(
+          width: 120,
+          height: 120,
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.85),
+            borderRadius: BorderRadius.circular(18),
+          ),
+          child: const Center(
+            child: CircularProgressIndicator(color: AppGreen.deep),
+          ),
+        ),
+      ),
+    );
+  }
 
   final BoxDecoration _tileBox = BoxDecoration(
     color: AppGreen.light.withOpacity(0.35),
@@ -5103,16 +7754,110 @@ class _EditProfilePageState extends State<EditProfilePage> {
     border: Border.all(color: AppGreen.mid.withOpacity(0.5)),
   );
 
+  Widget _buildAvatarSelector() {
+    final PageController pageController = PageController(
+      viewportFraction: 0.95,
+    );
+
+    return Container(
+      height: 350,
+      decoration: const BoxDecoration(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(25)),
+      ),
+      child: ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(25)),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 20),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.15),
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(25),
+              ),
+              border: Border.all(color: Colors.white.withOpacity(0.25)),
+            ),
+            child: Column(
+              children: [
+                SmoothPageIndicator(
+                  controller: pageController,
+                  count: avatarImages.length,
+                  effect: WormEffect(
+                    dotHeight: 9,
+                    dotWidth: 9,
+                    type: WormType.thinUnderground,
+                    spacing: 8,
+                    activeDotColor: Colors.white,
+                    dotColor: Colors.white.withOpacity(0.45),
+                  ),
+                ),
+                const SizedBox(height: 20),
+
+                // Swipe Avatars
+                Expanded(
+                  child: PageView.builder(
+                    controller: pageController,
+                    itemCount: avatarImages.length,
+                    itemBuilder: (context, index) {
+                      final avatar = avatarImages[index];
+                      return GestureDetector(
+                        onTap: () {
+                          setState(() => _selectedAvatar = avatar);
+                          Navigator.pop(context);
+                        },
+                        child: Container(
+                          margin: const EdgeInsets.symmetric(horizontal: 14),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(22),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.25),
+                                blurRadius: 10,
+                                offset: const Offset(0, 5),
+                              ),
+                            ],
+                          ),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(22),
+                            child: Image.asset(
+                              "assets/profile_avatars/$avatar",
+                              fit: BoxFit.cover,
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
+    _selectedAvatar =
+        (widget.selectedAvatar != null && widget.selectedAvatar!.isNotEmpty)
+        ? widget.selectedAvatar
+        : "avatar_1.png";
     teamsList = widget.teamsList
         .map((e) => Map<String, dynamic>.from(e))
         .toList();
     achievements = widget.achievements.map((e) {
       return {
-        "sport": e["sport"],
-        "records": List<Map<String, dynamic>>.from(e["records"] ?? []),
+        "sport": e["sport"] ?? "",
+        "records": [
+          {
+            "tournament": e["title"] ?? "",
+            "year": e["year"]?.toString() ?? "",
+            "achievement": e["achievement"] ?? "",
+            "experience": e["experience"] ?? "",
+          },
+        ],
       };
     }).toList();
   }
@@ -5134,8 +7879,34 @@ class _EditProfilePageState extends State<EditProfilePage> {
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
+            // 👇👇 INSERT THIS HERE 👇👇
+            GestureDetector(
+              onTap: () {
+                showModalBottomSheet(
+                  context: context,
+                  barrierColor: Colors.black.withOpacity(0.35),
+                  backgroundColor: Colors.transparent,
+                  shape: const RoundedRectangleBorder(
+                    borderRadius: BorderRadius.vertical(
+                      top: Radius.circular(20),
+                    ),
+                  ),
+                  builder: (_) => _buildAvatarSelector(),
+                );
+              },
+              child: CircleAvatar(
+                radius: 60,
+                backgroundColor: const Color(0xFFD4E7D0),
+                backgroundImage: AssetImage(
+                  'assets/profile_avatars/${_selectedAvatar ?? "avatar_1.png"}',
+                ),
+              ),
+            ),
+            const SizedBox(height: 25),
+
+            // 👆👆 END OF INSERT 👆👆
             _field("Name", _name),
-            _field("Email", _email),
+            _field("Email", _email, enabled: false),
             _field("Mobile", _phone),
             _field("Interested Sports", _sports),
             const SizedBox(height: 20),
@@ -5150,18 +7921,19 @@ class _EditProfilePageState extends State<EditProfilePage> {
     );
   }
 
-  Widget _field(String label, TextEditingController c) {
+  Widget _field(String label, TextEditingController c, {bool enabled = true}) {
     return Container(
       margin: const EdgeInsets.only(bottom: 14),
       child: TextField(
+        enabled: enabled,
         controller: c,
         style: const TextStyle(color: AppGreen.ink),
         decoration: InputDecoration(
           filled: true,
           fillColor: AppGreen.light.withOpacity(0.3),
           labelText: label,
-          labelStyle: const TextStyle(
-            color: AppGreen.ink,
+          labelStyle: TextStyle(
+            color: enabled ? AppGreen.ink : Colors.black38,
             fontWeight: FontWeight.w500,
           ),
           border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
@@ -5411,7 +8183,6 @@ class _EditProfilePageState extends State<EditProfilePage> {
             ),
           ),
           const SizedBox(height: 12),
-
           ...teamsList.asMap().entries.map((entry) {
             int i = entry.key;
             var team = entry.value;
@@ -5437,51 +8208,126 @@ class _EditProfilePageState extends State<EditProfilePage> {
 
                   Align(
                     alignment: Alignment.centerRight,
-                    child: (team['isLeader'] == true)
-                        ? TextButton.icon(
-                            icon: const Icon(
-                              Icons.edit,
-                              size: 18,
-                              color: AppGreen.deep,
-                            ),
-                            label: const Text(
-                              "Edit Team",
-                              style: TextStyle(color: AppGreen.deep),
-                            ),
-                            onPressed: () async {
-                              final updatedTeam = await Navigator.push(
+                    child: (team['isLeader'] == true || team['is_captain'] == 1)
+                        ? _glassTeamButton(
+                            label: "Edit Team",
+                            icon: Icons.edit,
+                            onTap: () async {
+                              // ✅ use teamId & sport from the mapped structure
+                              final int teamId = team['teamId'] ?? 0;
+                              final String sportName =
+                                  team['sport'] ?? "Unknown";
+
+                              final updated = await Navigator.push(
                                 context,
                                 MaterialPageRoute(
-                                  builder: (_) => AddTeamPage(
-                                    sportName: team['sport'],
-                                    sportId: team['sport_id'].toString(),
-                                    existingTeam: team,
+                                  builder: (_) => EditTeamPage(
+                                    teamId: teamId,
+                                    sportName: sportName,
                                   ),
                                 ),
                               );
-                              if (updatedTeam != null) {
-                                setState(() => teamsList[i] = updatedTeam);
+
+                              // if EditTeamPage returns "true" or {"reload": true}
+                              if (updated == true ||
+                                  (updated is Map &&
+                                      updated['reload'] == true)) {
+                                setState(() {});
                               }
                             },
                           )
-                        : TextButton.icon(
-                            onPressed: () {
-                              setState(() => teamsList.removeAt(i));
+                        : _glassTeamButton(
+                            label: "Quit Team",
+                            icon: Icons.exit_to_app,
+                            onTap: () async {
+                              final confirm = await _confirmQuitDialog(context);
+                              if (confirm != true) return;
+
+                              final res = await _authService.authPost(
+                                Uri.parse(
+                                  "$BASE_URL/api/teams/${team['teamId']}/leave/",
+                                ),
+                                {},
+                              );
+
+                              if (res.statusCode == 200) {
+                                showGlassAlert(context, "You left the team!");
+
+                                // Wait a moment so user can see alert
+                                await Future.delayed(
+                                  const Duration(milliseconds: 600),
+                                );
+
+                                // 👇 Redirect straight to Home & clear navigation stack
+                                Navigator.pushAndRemoveUntil(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (_) => const HomePage(),
+                                  ),
+                                  (route) => false,
+                                );
+                              } else {
+                                showGlassAlert(context, "Failed: ${res.body}");
+                              }
                             },
-                            icon: const Icon(
-                              Icons.exit_to_app,
-                              color: AppGreen.deep,
-                            ),
-                            label: const Text(
-                              "Quit Team",
-                              style: TextStyle(color: AppGreen.deep),
-                            ),
                           ),
                   ),
                 ],
               ),
             );
           }).toList(),
+        ],
+      ),
+    );
+  }
+
+  Widget _glassTeamButton({
+    required String label,
+    required IconData icon,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: AppGreen.deep.withOpacity(0.12),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: AppGreen.deep.withOpacity(0.3)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: AppGreen.deep, size: 18),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: const TextStyle(
+                color: AppGreen.deep,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<bool?> _confirmQuitDialog(BuildContext context) {
+    return showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("Leave Team?"),
+        content: const Text("Are you sure you want to quit this team?"),
+        actions: [
+          TextButton(
+            child: const Text("Cancel"),
+            onPressed: () => Navigator.pop(context, false),
+          ),
+          TextButton(
+            child: const Text("Leave", style: TextStyle(color: Colors.red)),
+            onPressed: () => Navigator.pop(context, true),
+          ),
         ],
       ),
     );
@@ -5517,9 +8363,9 @@ class _EditProfilePageState extends State<EditProfilePage> {
                 ),
               ],
             ),
-            child: const Text(
-              "Save Changes",
-              style: TextStyle(
+            child: Text(
+              text, // 🔥 now using passed text
+              style: const TextStyle(
                 color: Color(0xFF2E7D32), // AppGreen.deep
                 fontSize: 15,
                 fontWeight: FontWeight.bold,
@@ -5536,22 +8382,72 @@ class _EditProfilePageState extends State<EditProfilePage> {
       "Save Changes",
       color: AppGreen.deep,
       opacity: 0.28,
-      onTap: () {
-        Navigator.pop(context, {
-          "name": _name.text.trim(),
-          "email": _email.text.trim(),
-          "phone": _phone.text.trim(),
-          "sports": _sports.text.trim(),
-          "achievements": achievements,
-          "teamsList": teamsList,
-        });
+      onTap: () async {
+        if (_isSaving) return;
 
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: const Text("Profile Updated Successfully!"),
-            backgroundColor: AppGreen.deep,
-          ),
+        setState(() => _isSaving = true);
+        _showSavingDialog();
+
+        List<int> sportIds = [];
+        if (_sports.text.trim().isNotEmpty) {
+          sportIds = _sports.text
+              .split(",")
+              .map((sport) {
+                final s = sport.trim();
+                final key = s[0].toUpperCase() + s.substring(1).toLowerCase();
+                return sportNameToId[key] ?? 0;
+              })
+              .where((id) => id > 0)
+              .toList();
+        }
+
+        final achievementsPayload = achievements.expand((block) {
+          final sport = block["sport"] ?? "";
+          final experience = block["experience"] ?? "";
+          final records = block["records"] as List;
+
+          return records.map(
+            (r) => {
+              "sport": sport,
+              "title": r["tournament"] ?? "",
+              "year": int.tryParse(r["year"].toString()) ?? DateTime.now().year,
+              "achievement": r["achievement"] ?? "",
+              "experience": experience,
+            },
+          );
+        }).toList();
+
+        final payload = {
+          "name": _name.text.trim(),
+          "phone": _phone.text.trim(),
+          "avatar_id": _selectedAvatar,
+          "interested_sports": sportIds,
+          "achievements": achievementsPayload,
+        };
+
+        final res = await _authService.authPut(
+          Uri.parse("https://turf-mgmt-sys.onrender.com/api/profile/me/"),
+          payload,
         );
+
+        Navigator.pop(context); // remove loader
+        setState(() => _isSaving = false);
+
+        if (res.statusCode == 200) {
+          final refreshed = await _authService.authGet(
+            Uri.parse("https://turf-mgmt-sys.onrender.com/api/profile/me/"),
+          );
+
+          if (refreshed.statusCode == 200) {
+            final newData = jsonDecode(refreshed.body)["profile"];
+            await ProfileCache.saveProfile(newData);
+
+            Navigator.pop(context, newData);
+            showGlassAlert(context, "Profile Updated Successfully!");
+          }
+        } else {
+          showGlassAlert(context, "Failed to update profile");
+        }
       },
     );
   }
@@ -5688,7 +8584,16 @@ class _BookingHistoryPageState extends State<BookingHistoryPage> {
       extendBody: true,
       body: SafeArea(
         child: isLoading
-            ? const Center(child: CircularProgressIndicator())
+            ? Center(
+                child: SizedBox(
+                  width: 420, // keep large size
+                  height: 420,
+                  child: Image.asset(
+                    "assets/custom_loader.gif",
+                    fit: BoxFit.contain,
+                  ),
+                ),
+              )
             : Column(
                 children: [
                   Padding(
@@ -5715,20 +8620,40 @@ class _BookingHistoryPageState extends State<BookingHistoryPage> {
                     ),
                   ),
                   Expanded(
-                    child: SingleChildScrollView(
-                      physics: const BouncingScrollPhysics(),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 20,
-                        vertical: 10,
-                      ),
-                      child: Column(
-                        children: bookings
-                            .map(
-                              (booking) => _buildBookingTile(context, booking),
-                            )
-                            .toList(),
-                      ),
-                    ),
+                    child: isLoading
+                        ? const SizedBox.shrink()
+                        : (bookings.isEmpty
+                              ? Center(
+                                  child: Padding(
+                                    padding: const EdgeInsets.only(bottom: 80),
+                                    child: Text(
+                                      "No Booking History Yet",
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(
+                                        fontSize: 26,
+                                        color: Colors.black.withOpacity(0.6),
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ),
+                                )
+                              : SingleChildScrollView(
+                                  physics: const BouncingScrollPhysics(),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 20,
+                                    vertical: 10,
+                                  ),
+                                  child: Column(
+                                    children: bookings
+                                        .map(
+                                          (booking) => _buildBookingTile(
+                                            context,
+                                            booking,
+                                          ),
+                                        )
+                                        .toList(),
+                                  ),
+                                )),
                   ),
                 ],
               ),
@@ -6008,7 +8933,7 @@ final Map<int, String> groundIdMap = {
   1: "Football Ground 1",
   2: "Cricket Ground 1",
   3: "Cricket Ground 2",
-  4: "Hockey Ground",
+  4: "Hockey Ground 1",
   5: "Basketball Ground 1",
   6: "Basketball Ground 2",
   7: "Badminton Court 1",
@@ -6021,7 +8946,7 @@ final Map<int, String> groundIdMap = {
   14: "Table Tennis Room 2",
   15: "Table Tennis Room 3",
   16: "Table Tennis Room 4",
-  17: "Volleyball Court",
+  17: "Volleyball Court 1",
 };
 
 final Map<int, String> slotIdMap = {
@@ -6083,6 +9008,8 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
   final List<Map<String, TextEditingController>> _players = [];
   bool _insideCampus = true; // ✅ by default true
   bool _checkingLocation = true;
+  bool _submitLoading = false;
+  bool _inviteLoading = false;
 
   @override
   void initState() {
@@ -6188,17 +9115,14 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
     );
   }
 
-  final _api = ApiClient.instance;
-
   /// 1) Translate sport name to backend sport_id (unique translation table)
+  /// No backend call — use local mapping only
   Future<String> translateSportNameToId(String sportName) async {
-    // Example: GET /sports/translate?name=Tennis  -> { "sport_id": 3, "sport_name": "Tennis" }
-    final j = await _api.getJson(
-      TRANSLATE_SPORT_PATH,
-      query: {"name": sportName},
-    );
-    final id = j["sport_id"] ?? j["id"];
-    if (id == null) throw Exception("sport_id not found for $sportName");
+    // Use normalized lookup for safety
+    final id = sportNameToId[sportName.trim()];
+    if (id == null) {
+      throw Exception("sport_id not found in local mapping for $sportName");
+    }
     return id.toString();
   }
 
@@ -6211,18 +9135,18 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
       return;
     }
 
-    // ✅ Normalize sport name → clean case
+    // Normalize sport name
     final raw = widget.sport.trim().toLowerCase();
     final normalized = raw[0].toUpperCase() + raw.substring(1);
 
-    // ✅ Use your fixed ID table
+    // Translate to ID
     final sportId = sportNameToId[normalized];
     if (sportId == null) {
       showGlassAlert(context, "Sport not supported: ${widget.sport}");
       return;
     }
 
-    // ✅ Use only one slot (backend expects ONE)
+    // Validate slot
     final selectedSlot = widget.selectedSlots.isNotEmpty
         ? widget.selectedSlots.first
         : null;
@@ -6233,18 +9157,19 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
 
     final slotId = slotNameToId[selectedSlot];
     if (slotId == null) {
-      showGlassAlert(context, "Could not match slot to backend slot ID.");
+      showGlassAlert(context, "Unknown slot selected.");
       return;
     }
 
-    // ✅ FINAL PAYLOAD EXACTLY AS BACKEND EXPECTS
+    // FINAL BROADCAST PAYLOAD
     final payload = {
-      "sport_id": sportId, // integer ✅
-      "date": widget.slotDate, // string ✅
-      "slot_id": slotId, // integer ✅ NOT LIST
+      "sport_id": sportId,
+      "date": widget.slotDate, // 🟢 Required by backend
+      "slot_id": [slotId], // 🟢 Backend expects array or slot_ids
+      "message": "Looking for players to join a match!", // optional
     };
 
-    print("Sending Broadcast Payload: $payload");
+    print("BROADCAST PAYLOAD: $payload");
 
     try {
       final response = await http.post(
@@ -6259,16 +9184,16 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
       );
 
       print("BROADCAST STATUS = ${response.statusCode}");
-      print("BROADCAST BODY = ${response.body}");
+      print("BROADCAST RESPONSE = ${response.body}");
 
-      if (response.statusCode == 200) {
+      if (response.statusCode == 200 || response.statusCode == 202) {
         if (!mounted) return;
         Navigator.of(context).popUntil((route) => route.isFirst);
-        showGlassAlert(context, "✅ Invitation sent successfully!");
+        showGlassAlert(context, "Players invited successfully!");
       } else {
         showGlassAlert(
           context,
-          "Failed to send invitation (${response.statusCode}).\nCheck console logs.",
+          "Failed to broadcast (${response.statusCode}) — try again.",
         );
       }
     } catch (e) {
@@ -6513,7 +9438,7 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
                                     fillColor: const Color(
                                       0xFFBFE3C0,
                                     ).withOpacity(0.3),
-                                    labelText: "Email (optional)",
+                                    labelText: "Email",
                                     labelStyle: const TextStyle(
                                       color: Colors.black87,
                                       fontWeight: FontWeight.w500,
@@ -6550,47 +9475,75 @@ class _FinalSlotBookingPageState extends State<FinalSlotBookingPage> {
               Row(
                 children: [
                   Expanded(
-                    child: glassButton(
-                      "Submit",
-                      color: const Color(0xFF4CAF50),
-                      opacity: 0.25,
-                      onTap: () {
-                        if (_checkingLocation) {
-                          showGlassAlert(
-                            context,
-                            "Checking location… please wait.",
-                          );
-                          return;
-                        }
+                    child: _submitLoading
+                        ? const Center(
+                            child: SizedBox(
+                              height: 38,
+                              width: 38,
+                              child: CircularProgressIndicator(
+                                color: Colors.green,
+                              ),
+                            ),
+                          )
+                        : glassButton(
+                            "Submit",
+                            color: const Color(0xFF4CAF50),
+                            opacity: 0.25,
+                            onTap: () async {
+                              if (_checkingLocation) {
+                                showGlassAlert(
+                                  context,
+                                  "Checking location… please wait.",
+                                );
+                                return;
+                              }
 
-                        if (!_insideCampus) {
-                          showGlassAlert(
-                            context,
-                            "Location did not verify. Please move near window / enable GPS.",
-                          );
-                          return;
-                        }
-                        _submitBooking();
-                      },
-                    ),
+                              if (!_insideCampus) {
+                                showGlassAlert(
+                                  context,
+                                  "Location did not verify. Please move near window / enable GPS.",
+                                );
+                                return;
+                              }
+
+                              setState(() => _submitLoading = true);
+                              await _submitBooking();
+                              if (mounted)
+                                setState(() => _submitLoading = false);
+                            },
+                          ),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
-                    child: glassButton(
-                      "Invite Players",
-                      color: const Color(0xFF81C784),
-                      opacity: 0.25,
-                      onTap: () {
-                        if (!_insideCampus) {
-                          showGlassAlert(
-                            context,
-                            "You must be inside IIT Ropar campus to use this feature",
-                          );
-                          return;
-                        }
-                        _broadcastLookingForPlayers();
-                      },
-                    ),
+                    child: _inviteLoading
+                        ? const Center(
+                            child: SizedBox(
+                              height: 38,
+                              width: 38,
+                              child: CircularProgressIndicator(
+                                color: Colors.green,
+                              ),
+                            ),
+                          )
+                        : glassButton(
+                            "Invite Players",
+                            color: const Color(0xFF81C784),
+                            opacity: 0.25,
+                            onTap: () async {
+                              if (!_insideCampus) {
+                                showGlassAlert(
+                                  context,
+                                  "You must be inside IIT Ropar campus to use this feature",
+                                );
+                                return;
+                              }
+
+                              setState(() => _inviteLoading = true);
+                              await _broadcastLookingForPlayers();
+                              if (mounted)
+                                setState(() => _inviteLoading = false);
+                            },
+                          ),
                   ),
                 ],
               ),

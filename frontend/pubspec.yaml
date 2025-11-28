@@ -70,5 +70,6 @@ flutter:
   assets:
     - assets/
     - assets/event_posters/
+    - assets/profile_avatars/
 
 
